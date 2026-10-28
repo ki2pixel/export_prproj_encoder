@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Export FilmCraft">
+  <defs>
+    <linearGradient id="fond" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="voile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.99"/>
+      <stop offset="1" stop-color="#e2e8f0" stop-opacity="0.97"/>
+    </linearGradient>
+    <clipPath id="cadre">
+      <rect x="42" y="66" width="172" height="124" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <!-- Fond de l'icône -->
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#fond)"/>
+
+  <!-- Pellicule -->
+  <rect x="42" y="66" width="172" height="124" rx="16" fill="url(#voile)"/>
+
+  <!-- Perforations -->
+  <g fill="#065f46" opacity="0.9" clip-path="url(#cadre)">
+    <rect x="50" y="78" width="12" height="10" rx="3"/>
+    <rect x="50" y="100" width="12" height="10" rx="3"/>
+    <rect x="50" y="122" width="12" height="10" rx="3"/>
+    <rect x="50" y="144" width="12" height="10" rx="3"/>
+    <rect x="50" y="166" width="12" height="10" rx="3"/>
+    <rect x="194" y="78" width="12" height="10" rx="3"/>
+    <rect x="194" y="100" width="12" height="10" rx="3"/>
+    <rect x="194" y="122" width="12" height="10" rx="3"/>
+    <rect x="194" y="144" width="12" height="10" rx="3"/>
+    <rect x="194" y="166" width="12" height="10" rx="3"/>
+  </g>
+
+  <!-- Lecture / export -->
+  <path d="M104 100 L164 128 L104 156 Z" fill="#047857" stroke="#065f46" stroke-width="4" stroke-linejoin="round"/>
+</svg>

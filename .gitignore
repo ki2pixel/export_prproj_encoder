@@ -1,0 +1,42 @@
+# Environnement (contient les secrets de session)
+.env
+
+# Environnement virtuel Python
+.venv/
+venv/
+ENV/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Dossiers de travail (contenus générés)
+WATCH_IN/*
+!WATCH_IN/.gitkeep
+WATCH_OUT/*
+!WATCH_OUT/.gitkeep
+projects/
+logs_watchfolder/
+test_sandbox/
+test_sandbox*/
+
+# Archives de logs
+submission_log_archive_*
+monitor_log_backup.txt
+encoder_log_backup.txt
+
+# Base de données locales
+*.db
+*.sqlite3
+
+# Outils et éditeurs
+.commandcode/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
