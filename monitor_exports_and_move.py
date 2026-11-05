@@ -5,12 +5,10 @@ L'encodeur (`encoder_worker.py`) dépose les MP4 terminés dans `WATCH_FOLDER_OU
 en filet de sécurité) et les déplace/renomme vers le dossier projet d'origine, avec versionnage
 en cas de collision, quarantaine si aucun projet ne correspond, et réessais en cas de verrou.
 """
-import csv
 import datetime
 import os
 import re
 import shutil
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor

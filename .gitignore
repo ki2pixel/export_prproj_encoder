@@ -17,7 +17,6 @@ WATCH_IN/*
 !WATCH_IN/.gitkeep
 WATCH_OUT/*
 !WATCH_OUT/.gitkeep
-projects/
 logs_watchfolder/
 test_sandbox/
 test_sandbox*/

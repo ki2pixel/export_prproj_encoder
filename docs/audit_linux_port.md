@@ -4,7 +4,8 @@
 > `prproj2ffmpeg` (remplacement de la chaîne XML/FilmCraft par les projets `.prproj` encodés par
 > ffmpeg/NVENC, voir `PROVENANCE.md` et le plan de migration). Il reste utile pour comprendre les
 > choix de robustesse du moniteur et de l'UI, qui n'ont pas changé ; les références à
-> `filmcraft_cli.py`/`xmeml_utils.py` concernent le code d'alors (archivé dans `backup_pre_prproj/`).
+> `filmcraft_cli.py`/`xmeml_utils.py` concernent le code d'alors (supprimé depuis, récupérable dans
+> l'historique git au commit initial).
 
 **Date :** 2026-10-10 · **Périmètre :** code neuf ou modifié du projet `~/export_prproj_encoder`
 (`app.py`, `config.py`, `db_helper.py`, `encoder_worker.py`, `filmcraft_cli.py`,

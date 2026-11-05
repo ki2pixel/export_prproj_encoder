@@ -112,8 +112,8 @@ export_prproj_encoder/
 └── static/icon.svg               # icône (raccourci de bureau + favicon)
 ```
 
-Les fichiers supprimés lors de la migration depuis FilmCraft/`.xml` sont conservés dans
-`backup_pre_prproj/` (non utilisé par l'application).
+Les fichiers de l'ancienne chaîne FilmCraft/`.xml` ont été supprimés du dépôt ; ils restent
+récupérables dans l'historique git (`git show 1eb0c56:backup_pre_prproj/...`).
 
 ## Configuration (`.env`)
 

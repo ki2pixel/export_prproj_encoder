@@ -16,6 +16,7 @@ inchangée et utilisable en parallèle (jamais simultanément sur les mêmes pro
 - [folder_structure.md](./folder_structure.md) – arborescence des projets et des dossiers de travail.
 - [perf_export.md](./perf_export.md) – diagnostic et optimisation d'un export lent (overlay masqué 252 %, fenêtre visible, mesures A/B).
 - [audit_linux_port.md](./audit_linux_port.md) – audit du code de la version Linux (document historique, établi avant la migration `.prproj`/ffmpeg).
+- [archive/](./archive/) – documents historiques conservés pour référence (plan de correctifs appliqué, recherche FFmpeg/NVENC).
 
 ## Aperçu du workflow
 
