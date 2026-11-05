@@ -44,7 +44,9 @@ export_prproj_encoder/
 │   ├── <stem>_<job_id>.mp4       # export publié, en attente de déplacement par le moniteur
 │   ├── .staging/                 # encodage en cours (jamais exposé au moniteur)
 │   └── quarantine/               # exports non rapprochés d'une soumission (inspection manuelle)
-├── tools/prproj-unpacker/        # prproj2ffmpeg.py vendorisé (+ PROVENANCE.md, unpack.pl, LICENSE)
+├── tools/
+│   ├── benchmark_export.py       # benchmark A/B et mesures de performance (voir perf_export.md)
+│   └── prproj-unpacker/          # prproj2ffmpeg.py vendorisé (+ PROVENANCE.md, unpack.pl, LICENSE)
 ├── logs_watchfolder/
 │   ├── jobs.db                   # base SQLite (statuts par job_id)
 │   ├── submission_log.csv        # registre structuré des soumissions

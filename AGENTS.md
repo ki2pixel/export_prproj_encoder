@@ -25,15 +25,17 @@ diffusée en SSE). `LogPublisher` (max 50 clients, files de 500 messages) alimen
 - **`prproj_engine.py`** — pilotage du script d'encodage : `EncodeSettings`, `build_command()`
   (`<python> prproj2ffmpeg.py <projet> --out … --bitrate … --base …`), `run_export()` (Popen +
   sélecteur, progression périodique, abandon), `read_project_info()` (mode `--dump` : séquence,
-  durée, fps), `summarize_line()` (résumés français pour l'UI), `probe_ffmpeg()`, `ProcessRegistry`
-  (SIGTERM/SIGKILL sur le groupe de process).
+  durée, fps), `parse_ffmpeg_stats_line()` (statistiques `time=`/`speed=`), `summarize_line()`
+  (résumés français pour l'UI), `probe_ffmpeg()`, `ProcessRegistry` (SIGTERM/SIGKILL sur le groupe
+  de process).
 - **`tools/prproj-unpacker/`** — `prproj2ffmpeg.py` vendorisé (voir `PROVENANCE.md` et
   `UPSTREAM-SYNC.md`), `unpack.pl` et LICENSE. La source d'origine est introuvable depuis le
   2026-10-13 : cette copie est désormais **la copie de référence** ; les correctifs locaux y sont
   documentés et la re-synchronisation est décrite dans `UPSTREAM-SYNC.md`. Frame Hold natif
   (`FrameHold`/`FrameHoldStart`) et fenêtre visible des overlays flous (marge 4σ) sont rendus.
-- **`encoder_worker.py`** — file d'attente par scrutation de `WATCH_IN`, encodage séquentiel,
-  sortie en `WATCH_OUT/.staging/` puis publication atomique, adoption des projets déposés à la main,
+- **`encoder_worker.py`** — file d'attente par scrutation de `WATCH_IN`, suivi du lot (`batch`),
+  inspection en lecture seule (`queue_snapshot()`), encodage séquentiel, sortie en
+  `WATCH_OUT/.staging/` puis publication atomique, adoption des projets déposés à la main,
   reprise des jobs orphelins, pause/abandon.
 - **`submit_to_watchfolder.py`** — scan non récursif de `<projets>/*.prproj`, priorité à la variante
   `_assist` d'un projet, nom final attendu (nom du fichier `.prproj` nettoyé, sans préfixe numérique,
@@ -44,7 +46,9 @@ diffusée en SSE). `LogPublisher` (max 50 clients, files de 500 messages) alimen
   + `os.replace` inter-systèmes), versionnage, quarantaine, rescan périodique.
 - **`filename_utils.py`** — nettoyage/normalisation des noms, `strip_job_id()` / `extract_job_id()`,
   suffixe `_assist` (`is_assist_stem()` / `strip_assist_suffix()`).
-- **`templates/`, `static/`** — UI responsive (thème clair/sombre, SSE, statuts Soumission/Moniteur/Encodeur).
+- **`templates/`, `static/`** — UI responsive (thème clair/sombre, SSE, statuts
+  Soumission/Moniteur/Encodeur, panneau de suivi visuel des encodages : progression du lot, job
+  courant, file d'attente FIFO).
 - **`fixtures/`** — fixtures réelles (projet `.prproj`) utilisées par les tests.
 - **`docs/`** — documentation par module ; `perf_export.md` couvre le diagnostic des exports lents.
 
@@ -88,10 +92,11 @@ vendorisé).
 `unittest` uniquement, découvert par `python -m unittest discover`. Couverture actuelle : sécurité
 des chemins, versionnage, `job_id` (`strip_job_id` / `extract_job_id`), scan non récursif, priorité
 `_assist` (scan, nom final, garde-fou `EXPORT_SUPERSEDED`), contrat prproj2ffmpeg (`build_command`,
-`parse_bitrate`, `read_project_info`, `probe_ffmpeg`), résumés de lignes (`summarize_line`), plage
-alpha/cache (bornage `-t`, clé de contenu, cache négatif bbox `[]`, purge LRU), statuts appariables,
-déplacement vérifié (même FS et inter-FS), plus un smoke test Flask (`test_client` : CSP, auth,
-CSRF, `/api/status`).
+`parse_bitrate`, `read_project_info`, `probe_ffmpeg`), statistiques ffmpeg (`parse_ffmpeg_stats_line`),
+suivi du lot et file d'attente (`test_batch_progress`, `test_queue_snapshot...`), résumés de lignes
+(`summarize_line`), plage alpha/cache (bornage `-t`, clé de contenu, cache négatif bbox `[]`, purge
+LRU), statuts appariables, déplacement vérifié (même FS et inter-FS), plus un smoke test Flask
+(`test_client` : CSP, auth, CSRF, `/api/status`).
 Les fixtures réelles sont dans `fixtures/` ; les tests n'écrivent jamais hors de leurs bacs à sable
 (`test_sandbox*`). Aucun seuil de couverture imposé.
 

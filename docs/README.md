@@ -17,6 +17,7 @@ inchangée et utilisable en parallèle (jamais simultanément sur les mêmes pro
 - [perf_export.md](./perf_export.md) – diagnostic et optimisation d'un export lent (fenêtre visible, Frame Hold, overlay flou, cache alpha, mesures A/B).
 - [audit_linux_port.md](./audit_linux_port.md) – audit du code de la version Linux (document historique, établi avant la migration `.prproj`/ffmpeg).
 - [audits/audit_complet_prproj2ffmpeg.md](./audits/audit_complet_prproj2ffmpeg.md) – audit technique du moteur `prproj2ffmpeg` (document historique, correctifs appliqués le 2026-10-23).
+- [audits/Audit_de_sécurité_et_de_robustesse_backend.md](./audits/Audit_de_sécurité_et_de_robustesse_backend.md) – audit de sécurité et de robustesse backend (concurrence SQLite WAL, TOCTOU, signaux process group, anti-bombe gzip), correctifs appliqués le 2026-11-05.
 - [audits/audit_frontend_complet_export_prproj_encoder.md](./audits/audit_frontend_complet_export_prproj_encoder.md) – audit frontend complet (robustesse, performance, accessibilité, CSP/CSRF), correctifs appliqués le 2026-11-05.
 - [archive/](./archive/) – documents historiques conservés pour référence (plan de correctifs appliqué, recherche FFmpeg/NVENC).
 
@@ -40,18 +41,21 @@ flowchart LR
 
 ## Dossiers et fichiers clés
 
-- `app.py` : UI web (authentification par session, CSRF, CSP), console de logs SSE, statuts
+- `app.py` : UI web (authentification par session, CSRF, CSP), suivi visuel des encodages
+  (progression du lot, job courant, file d'attente), console de logs SSE, statuts
   Soumission / Moniteur / Encodeur. Démarre les deux threads de fond et lance la soumission en
   sous-processus.
 - `submit_to_watchfolder.py` : scan de `BASE_SCAN_FOLDER`, filtrage `FOLDER_KEYWORD`, priorité à la
   variante `_assist` d'un projet, nom final attendu d'après le nom du fichier `.prproj` nettoyé,
   copie atomique vérifiée vers `WATCH_IN`, journalisation SQLite + CSV + journal texte.
-- `encoder_worker.py` : consomme `WATCH_IN`, encode via `prproj2ffmpeg.py`, publie le MP4 dans
-  `WATCH_OUT`, archive le projet dans `WATCH_IN/Source/<horodatage>/`.
+- `encoder_worker.py` : consomme `WATCH_IN`, gère l'état du lot et de la file d'attente, encode via
+  `prproj2ffmpeg.py`, publie le MP4 dans `WATCH_OUT`, archive le projet dans
+  `WATCH_IN/Source/<horodatage>/`.
 - `monitor_exports_and_move.py` : surveille `WATCH_OUT` (watchdog + rescan périodique), déplace et
   renomme les exports, versionne les collisions, met en quarantaine les fichiers non rapprochés.
 - `prproj_engine.py` : pilotage du script d'encodage (construction de la commande, suivi de la
-  sortie en flux, progression, résumés français pour l'UI, abandon par groupe de process).
+  sortie en flux, extraction des statistiques ffmpeg `time=`/`speed=`, progression, résumés français
+  pour l'UI, abandon par groupe de process).
 - `tools/prproj-unpacker/` : `prproj2ffmpeg.py` vendorisé (voir `PROVENANCE.md` et `UPSTREAM-SYNC.md`) + `unpack.pl`.
 - `tools/benchmark_export.py` : benchmark reproductible (muxer `null`, `-benchmark`) ; voir
   [perf_export.md](./perf_export.md).
