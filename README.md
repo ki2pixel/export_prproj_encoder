@@ -68,7 +68,7 @@ Le raccourci (icône `static/icon.svg`) lance `run_app.sh --background` : double
 arrière-plan et interface ouverte dans le navigateur. Sur GNOME, autoriser le lancement au premier
 double-clic si la boîte de dialogue le demande.
 
-Puis http://localhost:5050 (ou le port configuré dans `.env` ; utilisateur `admin`, mot de passe `API_PASSWORD` du `.env`).
+Puis http://localhost:5000 (ou le port configuré dans `.env` ; utilisateur `admin`, mot de passe `API_PASSWORD` du `.env`).
 Au démarrage, l'encodeur et le moniteur d'exports sont lancés automatiquement (threads daemon) ;
 les jobs encore en attente dans `WATCH_IN` sont repris.
 
@@ -122,15 +122,17 @@ récupérables dans l'historique git (`git show 1eb0c56:backup_pre_prproj/...`).
 | `BASE_SCAN_FOLDER` / `FOLDER_KEYWORD` / `PROJECTS_SUBFOLDER` | Racine scannée et filtre de dossiers (ex. `/mnt/cache` + `Camille` + `projets`) |
 | `INPUT_EXTENSIONS` | Extensions soumises (défaut `.prproj`) |
 | `WATCH_FOLDER_INPUT` / `WATCH_FOLDER_OUTPUT` | Watch folders locaux (entrée / sortie) |
+| `SOURCE_ARCHIVE_DIRNAME` / `STAGING_DIRNAME` / `QUARANTINE_DIRNAME` | Noms des sous-dossiers techniques (`Source`, `.staging`, `quarantine`) |
 | `LOGS_DIRECTORY` + `SUBMISSION_LOG_FILE`/`SUBMISSION_TEXT_LOG_FILE`/`MONITOR_LOG_FILE`/`ENCODER_LOG_FILE` | Journaux (registre CSV structuré, journal texte lisible, moniteur, encodeur) |
 | `JOBS_DB_FILE` / `EXPORT_LOG_DIRECTORY` | Base SQLite, journal complet par encodage |
 | `OUTPUT_EXTENSION` / `OUTPUT_FILENAME_FORMAT` | Sortie et nom final (placeholder `{project_file_stem}`) |
-| `PRPROJ2FFMPEG_SCRIPT` | Script d'encodage (défaut : `tools/prproj-unpacker/prproj2ffmpeg.py`, surchargeable) |
+| `PRPROJ2FFMPEG_SCRIPT` / `PRPROJ2FFMPEG_PYTHON` | Script d'encodage (défaut : `tools/prproj-unpacker/prproj2ffmpeg.py`) et interpréteur Python utilisé pour le lancer (défaut : celui de l'application) |
 | `PRPROJ2FFMPEG_ENCODER` / `PRPROJ2FFMPEG_BITRATE` | Réglages d'encodage (défaut : `auto` → NVENC si disponible, CBR `10M`) |
 | `PRPROJ2FFMPEG_EXTRA_BASES` | Bases supplémentaires de résolution des médias (séparées par `:`) |
 | `PRPROJ2FFMPEG_CACHE_MAX_MB` | Plafond du cache disque alpha/bbox (Mo, défaut 2048 ; 0 = illimité ; purge LRU) |
+| `PRPROJ2FFMPEG_ALPHA_FULL_TAIL_MAX` | Queue inutilisée tolérée avant conversion pleine durée de l'intermédiaire alpha (s, défaut 15 ; 60 pour un lot partageant un média) |
 | `ENCODER_POLL_INTERVAL` / `ENCODER_PROGRESS_INTERVAL` / `ENCODER_ABORT_GRACE_SECONDS` | Comportement de l'encodeur |
-| `STABLE_FILE_*` / `MOVE_RETRY_*` / `RESCAN_INTERVAL_SECONDS` | Surveillance et déplacement |
+| `STABLE_FILE_*` / `MOVE_RETRY_*` / `RESCAN_INTERVAL_SECONDS` / `CLEAN_OUTPUT_GUARD_SECONDS` | Surveillance, déplacement et protection du nettoyage des sorties |
 | `ALLOW_OVERWRITE` / `ENABLE_FALLBACK_MOVE` / `ENABLE_HEURISTIC_MATCHING` | Règles de collision et de repli |
 | `API_USER` / `API_PASSWORD` / `SECRET_KEY` / `FLASK_HOST` / `FLASK_PORT` / `FLASK_DEBUG` | Sécurité et serveur |
 
@@ -151,6 +153,8 @@ récupérables dans l'historique git (`git show 1eb0c56:backup_pre_prproj/...`).
 
 `SUBMITTED_TO_WATCHFOLDER` → `EXPORT_ENCODING` → `EXPORT_DONE` / `EXPORT_FAILED` /
 `EXPORT_ABORTED` → `EXPORT_MOVED_TO_FINAL` / `EXPORT_FAILED_TO_MOVE`.
+Une soumission normale remplacée par une variante `_assist` avant encodage passe à
+`EXPORT_SUPERSEDED` (job archivé sans MP4).
 (`EXPORT_DONE_WITH_WARNINGS` reste accepté pour l'historique de la base ; il n'est plus émis.)
 
 ## Tests et vérifications

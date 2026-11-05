@@ -8,7 +8,8 @@ unique `{stem}_{job_id}.prproj` (copie atomique .tmp → rename, vérifiée). L'
 Options CLI :
     --force                  : soumet même si l'export final existe déjà à destination
     --clean_source_archive   : vide l'archive des sources traitées (WATCH_IN/Source)
-    --clean_outputs          : vide les sorties en attente, le staging et la quarantaine
+    --clean_outputs          : vide les MP4 publiés à la racine de WATCH_OUT (le staging, la
+                               quarantaine et les fichiers récents sont préservés)
 """
 import argparse
 import csv
@@ -539,7 +540,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--clean_outputs",
         action="store_true",
-        help=f"Nettoie le watchfolder de sortie ({WATCH_FOLDER_OUTPUT}) des fichiers *{OUTPUT_EXTENSION}, du staging et de la quarantaine."
+        help=f"Nettoie le watchfolder de sortie ({WATCH_FOLDER_OUTPUT}) des fichiers *{OUTPUT_EXTENSION} publiés (staging, quarantaine et fichiers récents préservés)."
     )
     args = parser.parse_args()
 

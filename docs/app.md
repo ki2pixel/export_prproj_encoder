@@ -40,7 +40,7 @@ fond et lance la soumission en sous-processus.
 | `/login` | GET, POST | formulaire / connexion (CSRF requis en POST) |
 | `/logout` | GET | destruction de session |
 | `/api/health` | GET | `{"status": "ok"}` (loopback uniquement, 403 sinon) |
-| `/api/status` | GET | `{running, monitor_running, encoder:{running, paused, queue_pending, current_job, current_file, processed, failed, aborted, encoder_available, encoder_engine, last_error}}` |
+| `/api/status` | GET | `{running, monitor_running, encoder:{running, paused, queue_pending, current_job, current_file, current_started_at, processed, failed, aborted, encoder_available, encoder_engine, last_error}}` |
 | `/api/start` | POST | `{force, clean_source_archive, clean_outputs}` (booléens stricts) → lance la soumission et reprend l'encodeur |
 | `/api/stop` | POST | arrête la soumission (`terminate()` puis `kill()` après 5 s) et met l'encodeur en pause en abandonnant le job en cours |
 | `/api/logs/stream` | GET | flux SSE (`text/event-stream`) |

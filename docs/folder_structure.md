@@ -49,8 +49,8 @@ export_prproj_encoder/
 │   ├── jobs.db                   # base SQLite (statuts par job_id)
 │   ├── submission_log.csv        # registre structuré des soumissions
 │   ├── submission_log.txt        # journal texte lisible (+ archives horodatées)
-│   ├── monitor_log.txt           # journal du moniteur (+ backup à 5 Mo)
-│   ├── encoder_log.txt           # journal de l'encodeur (+ backup à 5 Mo)
+│   ├── monitor_log.txt           # journal du moniteur (+ backup au démarrage à 5 Mo)
+│   ├── encoder_log.txt           # journal de l'encodeur (+ backup au démarrage à 5 Mo)
 │   └── exports/<stem>_<job_id>.log   # journal complet de chaque encodage (commande ffmpeg + sortie)
 ├── fixtures/                     # fixtures réelles pour les tests (projet .prproj)
 └── test_sandbox*/                # bacs à sable des tests unitaires (créés puis supprimés)

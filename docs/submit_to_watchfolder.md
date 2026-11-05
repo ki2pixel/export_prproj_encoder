@@ -36,7 +36,8 @@ Script lancé en sous-processus par l'application (et utilisable seul en ligne d
      nettoyée par `sanitize_filename_stem()` et `sanitize_for_filesystem()` (caractères interdits
      par NTFS, points/espaces finaux) ;
    - repli : stem brut du fichier si le nettoyage donne un résultat vide.
-   C'est le même nom que celui produit par défaut par `prproj2ffmpeg` (`--out` à côté du projet).
+   C'est le nom que produirait `prproj2ffmpeg` lancé directement sur le `.prproj` d'origine
+   (sortie à côté du projet) ; dans l'application, un `--out` explicite pointe vers le staging.
 6. **Décision** : si le MP4 final existe déjà à destination
    (`resolve_project_root(prproj) / nom_attendu.mp4`) le projet est ignoré, sauf `--force`.
 7. **Copie atomique** (`copy_to_watchfolder_root`) vers `WATCH_IN` sous le nom

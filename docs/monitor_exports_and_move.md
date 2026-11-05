@@ -59,7 +59,8 @@ Il surveille `WATCH_OUT` et rapproche chaque MP4 de sa soumission.
 
 ## Journal
 
-`logs_watchfolder/monitor_log.txt` (rotation au-delà de 5 Mo, préfixe `(Monitor)` dans l'UI).
+`logs_watchfolder/monitor_log.txt` (rotation au démarrage au-delà de 5 Mo, préfixe `(Monitor)` dans
+l'UI).
 
 ## Points vérifiés en exploitation
 

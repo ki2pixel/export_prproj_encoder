@@ -14,8 +14,9 @@ inchangée et utilisable en parallèle (jamais simultanément sur les mêmes pro
 - [encoder_worker.md](./encoder_worker.md) – file d'attente, `prproj2ffmpeg` (ffmpeg/NVENC), staging, reprise, abandon.
 - [monitor_exports_and_move.md](./monitor_exports_and_move.md) – surveillance de la sortie, rapprochement, déplacement, quarantaine.
 - [folder_structure.md](./folder_structure.md) – arborescence des projets et des dossiers de travail.
-- [perf_export.md](./perf_export.md) – diagnostic et optimisation d'un export lent (overlay masqué 252 %, fenêtre visible, mesures A/B).
+- [perf_export.md](./perf_export.md) – diagnostic et optimisation d'un export lent (fenêtre visible, Frame Hold, overlay flou, cache alpha, mesures A/B).
 - [audit_linux_port.md](./audit_linux_port.md) – audit du code de la version Linux (document historique, établi avant la migration `.prproj`/ffmpeg).
+- [audits/audit_complet_prproj2ffmpeg.md](./audits/audit_complet_prproj2ffmpeg.md) – audit technique du moteur `prproj2ffmpeg` (document historique, correctifs appliqués le 2026-10-23).
 - [archive/](./archive/) – documents historiques conservés pour référence (plan de correctifs appliqué, recherche FFmpeg/NVENC).
 
 ## Aperçu du workflow
@@ -50,7 +51,7 @@ flowchart LR
   renomme les exports, versionne les collisions, met en quarantaine les fichiers non rapprochés.
 - `prproj_engine.py` : pilotage du script d'encodage (construction de la commande, suivi de la
   sortie en flux, progression, résumés français pour l'UI, abandon par groupe de process).
-- `tools/prproj-unpacker/` : `prproj2ffmpeg.py` vendorisé (voir `PROVENANCE.md`) + `unpack.pl`.
+- `tools/prproj-unpacker/` : `prproj2ffmpeg.py` vendorisé (voir `PROVENANCE.md` et `UPSTREAM-SYNC.md`) + `unpack.pl`.
 - `tools/benchmark_export.py` : benchmark reproductible (muxer `null`, `-benchmark`) ; voir
   [perf_export.md](./perf_export.md).
 - `config.py` / `db_helper.py` / `filename_utils.py` : configuration, persistance, noms de fichiers.
@@ -58,7 +59,7 @@ flowchart LR
   - `jobs.db` (base pivot des statuts d'export) ;
   - `submission_log.csv` (registre structuré, une ligne par soumission) ;
   - `submission_log.txt` (journal texte lisible, archivé à chaque soumission) ;
-  - `monitor_log.txt` / `encoder_log.txt` (journaux des tâches de fond, rotation à 5 Mo) ;
+  - `monitor_log.txt` / `encoder_log.txt` (journaux des tâches de fond, rotation au démarrage au-delà de 5 Mo) ;
   - `exports/<job>.log` (journal complet de chaque encodage : commande ffmpeg + sortie brute).
 - `WATCH_IN/` (`Source/`), `WATCH_OUT/` (`.staging/`, `quarantine/`).
 
@@ -74,6 +75,8 @@ variable). Points d'attention :
   NTFS ;
 - `OUTPUT_FILENAME_FORMAT` accepte `{project_file_stem}` (nom du fichier `.prproj` nettoyé : préfixe
   numérique, « copy N » et suffixe `_assist` retirés, suffixes de version `_2` conservés — défaut) ;
+- `PRPROJ2FFMPEG_SCRIPT` / `PRPROJ2FFMPEG_PYTHON` localisent le script vendorisé et l'interpréteur
+  Python qui l'exécute ;
 - les réglages d'encodage (`PRPROJ2FFMPEG_ENCODER`, `PRPROJ2FFMPEG_BITRATE`) pilotent le script
   vendorisé : `auto` = `h264_nvenc` si réellement utilisable (préflight, repli `libx264`), CBR
   10 Mbps + audio AAC 320 kbps (toutes les pistes mixées) ;

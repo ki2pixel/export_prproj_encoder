@@ -45,12 +45,14 @@ Il joue le rôle qu'occupait AME entre le watchfolder d'entrée et le watchfolde
       WATCH_IN/<stem>_<job_id>.prproj \
       --out WATCH_OUT/.staging/<stem>_<job_id>.mp4 \
       --bitrate 10M \
-      --base <racine du projet d'origine> --base <son parent> --base /mnt/cache
+      --base <racine du projet d'origine> --base <son parent> --base <BASE_SCAN_FOLDER>
+      # + --base <PRPROJ2FFMPEG_EXTRA_BASES> si configuré
       # + --encoder <h264_nvenc|libx264> uniquement si forcé dans .env
   ```
 
   Le script construit lui-même la commande ffmpeg (H.264 CBR, audio AAC 320 kbps, `+faststart`) et
-  la journalise ; il replie automatiquement sur `libx264` si `h264_nvenc` est indisponible.
+  la journalise ; en mode `auto`, il replie sur `libx264` si `h264_nvenc` est indisponible (un
+  encodeur forcé via `--encoder` n'est jamais replié).
 - La sortie (script + ffmpeg fusionnés) est lue sans bloquer (sélecteur + tampon borné, découpé sur
   `\r` **et** `\n` car ffmpeg rafraîchit ses statistiques avec `\r`) : tout est écrit **en flux**
   dans `logs_watchfolder/exports/<stem>_<job_id>.log`, et les lignes signifiantes (erreurs, phases
@@ -85,5 +87,5 @@ Il joue le rôle qu'occupait AME entre le watchfolder d'entrée et le watchfolde
 
 ## Journal
 
-`logs_watchfolder/encoder_log.txt` (rotation au-delà de 5 Mo, préfixe `(Encoder)` conservé dans l'UI
-pour le coloriage).
+`logs_watchfolder/encoder_log.txt` (rotation au démarrage au-delà de 5 Mo, préfixe `(Encoder)`
+conservé dans l'UI pour le coloriage).
