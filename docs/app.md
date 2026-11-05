@@ -17,8 +17,12 @@ fond et lance la soumission en sous-processus.
      (`_csrf_token`) exigé sur toute requête mutative (`csrf_protect`). À la connexion réussie :
      `session.clear()`, régénération explicite du jeton CSRF et session permanente (anti-fixation).
    - Cookies `HttpOnly`, `SameSite=Lax`, `Secure` dès que le serveur n'écoute pas en loopback,
-     session de 8 h. En-têtes `Content-Security-Policy`, `X-Content-Type-Options`,
-     `Referrer-Policy`, `X-Frame-Options` sur toutes les réponses.
+     session de 8 h. En-têtes `Content-Security-Policy` (`default-src 'self'`, `base-uri 'self'`,
+     `form-action 'self'`, `object-src 'none'`, `style-src 'self'`, `font-src 'self'`,
+     `script-src 'self'`, `connect-src 'self'`, `img-src 'self' data:`),
+     `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options` sur toutes les réponses.
+     Aucune ressource externe n'est chargée : les polices utilisent la pile système et
+     l'interface reste pleinement fonctionnelle en environnement isolé (air-gap).
    - `/logout` accepte `GET` et `POST` : un `POST` exige le jeton CSRF, un `GET` portant
      `Sec-Fetch-Site: cross-site` est refusé (une balise `<img>` tierce ne peut pas déconnecter).
    - `/api/health` est la seule route non authentifiée, et elle refuse tout client non loopback.
@@ -31,7 +35,27 @@ fond et lance la soumission en sous-processus.
    toutes les secondes ; `/api/logs/history` sert les 100 dernières lignes du journal texte de
    soumission ; `/api/logs/clear` vide les files.
 
-3. **Orchestration** :
+3. **Interface web et robustesse frontend** (`static/script.js`, `static/style.css`) :
+   - **Polling unique** de `/api/status` toutes les 2 s, avec timeout de requête de 8 s
+     (`AbortController`), verrou anti-exécution concurrente et suspension lorsque l'onglet est
+     masqué (`visibilitychange`). Le retour sur l'onglet déclenche un rafraîchissement immédiat.
+   - **SSE** : historique chargé avant l'ouverture du flux ; reconnexion avec backoff exponentiel
+     de 5 s à 30 s, timer annulable à l'arrêt de la session.
+   - **Console de logs** plafonnée à 500 lignes, insertion par `DocumentFragment` (un seul reflow),
+     auto-scroll mesuré avant mutation, compteur synchronisé sur le DOM réel.
+   - **Purge des logs** : confirmation via un `<dialog>` non bloquant, effacement local puis
+     `POST /api/logs/clear`, sans réinjection de l'historique fichier. Une reconnexion réseau
+     conserve les lignes déjà affichées.
+   - **Stockage** : les accès `localStorage` (thème, annonces vocales) sont encapsulés et
+     dégradent silencieusement si le navigateur les interdit ou si le quota est plein.
+   - **Accessibilité** : classes de contraste WCAG AA pour les statuts, pastilles différenciées
+     (`running`, `paused`, `error`, `offline`), `role="switch"` sur le thème, console focalisable,
+     regroupement `<fieldset>/<legend>`, landmark `<main>` sur `/login`, focus visible et respect
+     de `prefers-reduced-motion` (texte des boutons conservé, spinner masqué).
+   - **Thème** : pile de polices système (aucun appel à Google Fonts) et thème sombre natif sur
+     la page de connexion via `prefers-color-scheme`.
+
+4. **Orchestration** :
    - le **moniteur d'exports** (`monitor_exports_and_move.start_monitor`) tourne dans un thread
      daemon et pousse ses lignes vers l'UI (`log_callback`) ;
    - l'**encodeur** (`encoder_worker.start_encoder`) tourne dans un second thread daemon ;
@@ -52,14 +76,14 @@ fond et lance la soumission en sous-processus.
 |---|---|---|
 | `/` | GET | page principale (auth requise) |
 | `/login` | GET, POST | formulaire / connexion (CSRF requis en POST) |
-| `/logout` | GET, POST | destruction de session (POST avec CSRF ; GET cross-site refusé) |
+| `/logout` | GET, POST | destruction de session (l'UI utilise un formulaire POST avec CSRF ; GET cross-site refusé) |
 | `/api/health` | GET | `{"status": "ok"}` (loopback uniquement, sans proxy non authentifié ; 403 sinon) |
 | `/api/status` | GET | `{running, monitor_running, encoder:{running, paused, queue_pending, current_job, current_file, current_started_at, processed, failed, aborted, encoder_available, encoder_engine, last_error}}` |
 | `/api/start` | POST | `{force, clean_source_archive, clean_outputs}` (booléens stricts) → lance la soumission et reprend l'encodeur |
 | `/api/stop` | POST | arrête la soumission (`terminate()` puis `kill()` après 5 s) et met l'encodeur en pause en abandonnant le job en cours |
 | `/api/logs/stream` | GET | flux SSE (`text/event-stream`) |
 | `/api/logs/history` | GET | 100 dernières lignes du journal texte + `encoding_used` |
-| `/api/logs/clear` | POST | purge les files SSE |
+| `/api/logs/clear` | POST | purge les files SSE (l'historique fichier n'est pas réaffiché côté client) |
 
 ## Journalisation au démarrage
 

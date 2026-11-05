@@ -49,14 +49,17 @@ from prproj_engine import probe_ffmpeg, resolve_script
 app = Flask(__name__)
 
 # --- En-têtes de sécurité (CSP) ---
-# `unsafe-inline` est requis pour la balise <script> qui injecte window.CSRF_TOKEN.
-# style-src https://fonts.googleapis.com et font-src https://fonts.gstatic.com :
-#   la feuille de style Google Fonts reste utilisable (self = localhost:5000).
-# Pas de 'unsafe-inline' sur script-src : les seuls scripts sont statiques + le jeton inline.
+# Aucune ressource externe : les polices sont fournies par la pile système, les styles et
+# scripts sont servis depuis /static, et le jeton CSRF passe par <meta name="csrf-token">.
+# `base-uri`, `form-action` et `object-src` limitent les injections de base, les formulaires
+# sortants et les plugins. `style-src 'self'` reste possible car le JS ne mute plus de style inline.
 _CSP_HEADER = (
     "default-src 'self'; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-    "font-src 'self' https://fonts.gstatic.com; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'; "
+    "style-src 'self'; "
+    "font-src 'self'; "
     "script-src 'self'; "
     "connect-src 'self'; "
     "img-src 'self' data:"

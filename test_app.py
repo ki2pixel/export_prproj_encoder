@@ -1966,12 +1966,74 @@ class TestFlaskSmoke(unittest.TestCase):
         self.assertIsNotNone(match, "Jeton CSRF absent du formulaire de connexion")
         return match.group(1)
 
+    def _login(self):
+        token = self._csrf_token()
+        response = self.client.post('/login', data={
+            'username': self.config_module.API_USER,
+            'password': self.config_module.API_PASSWORD,
+            'csrf_token': token,
+        })
+        self.assertEqual(response.status_code, 302)
+        return response
+
     def test_health_et_entetes_de_securite(self):
         response = self.client.get('/api/health')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {'status': 'ok'})
-        self.assertIn("default-src 'self'", response.headers.get('Content-Security-Policy', ''))
+        csp = response.headers.get('Content-Security-Policy', '')
+        self.assertIn("default-src 'self'", csp)
+        self.assertIn("base-uri 'self'", csp)
+        self.assertIn("form-action 'self'", csp)
+        self.assertIn("object-src 'none'", csp)
+        self.assertIn("style-src 'self'", csp)
+        self.assertNotIn("'unsafe-inline'", csp)
+        self.assertNotIn('fonts.googleapis.com', csp)
+        self.assertNotIn('fonts.gstatic.com', csp)
         self.assertEqual(response.headers.get('X-Frame-Options'), 'DENY')
+
+    def test_pages_sans_dependance_externe(self):
+        """PERF-F03 : aucune page ne doit dépendre de Google Fonts (fonctionnement air-gap)."""
+        login_html = self.client.get('/login').get_data(as_text=True)
+        self._login()
+        index_html = self.client.get('/').get_data(as_text=True)
+
+        for html in (login_html, index_html):
+            self.assertNotIn('fonts.googleapis.com', html)
+            self.assertNotIn('fonts.gstatic.com', html)
+            self.assertNotIn('Outfit', html)
+
+    def test_login_landmark_et_champs_autocomplete(self):
+        """A11Y-F04 / UX-F03 : landmark principal, CSRF conservé et champs autocomplétés."""
+        page = self.client.get('/login')
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn('<main class="login-container">', html)
+        self.assertIn('autocomplete="username"', html)
+        self.assertIn('autocomplete="current-password"', html)
+        self.assertIn('name="csrf-token"', html)
+
+    def test_accessibilite_index_et_deconnexion_post(self):
+        """A11Y-F02/F03/F04, SEC-F03 et UX-F02 : structure, attributs et logout POST CSRF."""
+        self._login()
+        page = self.client.get('/')
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+
+        self.assertIn('role="switch"', html)
+        self.assertIn('aria-checked="false"', html)
+        self.assertIn('tabindex="0"', html)
+        self.assertIn("aria-label=\"Console des journaux d'exécution\"", html)
+        self.assertIn('id="encoderEngineInfo"', html)
+        self.assertIn('<fieldset class="options-fieldset">', html)
+        self.assertIn("<legend class=\"sr-only\">Options d'export</legend>", html)
+        self.assertIn('id="confirmDialog"', html)
+        self.assertIn('method="dialog"', html)
+        self.assertIn('<form action="/logout" method="POST" class="logout-form">', html)
+
+        token = self._form_token(html)
+        response = self.client.post('/logout', data={'csrf_token': token})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.client.get('/api/status').status_code, 401)
 
     def test_index_protege_par_authentification(self):
         response = self.client.get('/')

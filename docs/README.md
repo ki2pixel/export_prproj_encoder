@@ -17,6 +17,7 @@ inchangée et utilisable en parallèle (jamais simultanément sur les mêmes pro
 - [perf_export.md](./perf_export.md) – diagnostic et optimisation d'un export lent (fenêtre visible, Frame Hold, overlay flou, cache alpha, mesures A/B).
 - [audit_linux_port.md](./audit_linux_port.md) – audit du code de la version Linux (document historique, établi avant la migration `.prproj`/ffmpeg).
 - [audits/audit_complet_prproj2ffmpeg.md](./audits/audit_complet_prproj2ffmpeg.md) – audit technique du moteur `prproj2ffmpeg` (document historique, correctifs appliqués le 2026-10-23).
+- [audits/audit_frontend_complet_export_prproj_encoder.md](./audits/audit_frontend_complet_export_prproj_encoder.md) – audit frontend complet (robustesse, performance, accessibilité, CSP/CSRF), correctifs appliqués le 2026-11-05.
 - [archive/](./archive/) – documents historiques conservés pour référence (plan de correctifs appliqué, recherche FFmpeg/NVENC).
 
 ## Aperçu du workflow

@@ -6,9 +6,6 @@
     <title>Submit to Watchfolder - Export MP4 (.prproj)</title>
     <meta name="csrf-token" content="{{ csrf_token }}">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icon.svg') }}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -22,26 +19,29 @@
                         <path d="M9 13h6"></path>
                         <path d="M9 17h6"></path>
                     </svg>
-                    Submit to Watchfolder <span id="offlineBadge" class="badge-offline">Hors-ligne</span>
+                    Submit to Watchfolder <span id="offlineBadge" class="badge-offline" hidden>Hors-ligne</span>
                 </h1>
                 <p class="subtitle">Gestionnaire de soumission d'exports Premiere Pro (.prproj) encodés en H.264 via ffmpeg/NVENC</p>
             </div>
             <div class="header-controls">
                 <div class="theme-switch">
-                    <input type="checkbox" id="themeSwitch" aria-label="Activer le mode sombre">
+                    <input type="checkbox" id="themeSwitch" role="switch" aria-checked="false" aria-label="Mode sombre">
                     <label for="themeSwitch" class="switch">
                         <span class="switch-visual" aria-hidden="true"></span>
                         <span class="switch-text" id="themeLabel">Mode sombre</span>
                     </label>
                 </div>
-                <a href="/logout" class="btn-logout">
-                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-                        <path d="M16 17l5-5-5-5"></path>
-                        <path d="M21 12H9"></path>
-                    </svg>
-                    Déconnexion
-                </a>
+                <form action="/logout" method="POST" class="logout-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn-logout">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                            <path d="M16 17l5-5-5-5"></path>
+                            <path d="M21 12H9"></path>
+                        </svg>
+                        Déconnexion
+                    </button>
+                </form>
             </div>
         </header>
 
@@ -49,18 +49,33 @@
             <!-- Panneau de contrôle -->
             <div class="control-panel">
                 <div class="control-section">
-                    <h2>
-                        <span class="status-indicator" id="statusIndicator"></span>
-                        Soumission: <span id="statusText" aria-live="polite">Prêt</span>
-                    </h2>
-                    <h2 class="monitor-status-title">
-                        <span class="status-indicator" id="monitorStatusIndicator"></span>
-                        Moniteur: <span id="monitorStatusText" aria-live="polite">Prêt</span>
-                    </h2>
-                    <h2 class="monitor-status-title">
-                        <span class="status-indicator" id="encoderStatusIndicator"></span>
-                        Encodeur: <span id="encoderStatusText" aria-live="polite">Prêt</span>
-                    </h2>
+                    <h2>État des services</h2>
+                    <dl class="status-list">
+                        <div class="status-row">
+                            <dt>
+                                <span class="status-indicator" id="statusIndicator" aria-hidden="true"></span>
+                                Soumission
+                            </dt>
+                            <dd><span id="statusText" aria-live="polite">Prêt</span></dd>
+                        </div>
+                        <div class="status-row">
+                            <dt>
+                                <span class="status-indicator" id="monitorStatusIndicator" aria-hidden="true"></span>
+                                Moniteur
+                            </dt>
+                            <dd><span id="monitorStatusText" aria-live="polite">Prêt</span></dd>
+                        </div>
+                        <div class="status-row">
+                            <dt>
+                                <span class="status-indicator" id="encoderStatusIndicator" aria-hidden="true"></span>
+                                Encodeur
+                            </dt>
+                            <dd>
+                                <span id="encoderStatusText" aria-live="polite">Prêt</span>
+                                <small id="encoderEngineInfo" class="encoder-engine-text"></small>
+                            </dd>
+                        </div>
+                    </dl>
                 </div>
 
                 <div class="control-section">
@@ -71,23 +86,26 @@
                         </svg>
                         Options
                     </h2>
-                    <div class="checkbox-group">
-                        <label class="checkbox-label" for="forceOverwrite">
-                            <input type="checkbox" id="forceOverwrite">
-                            <span><strong>Forcer l'écrasement</strong><br>
-                            <small>Soumettre même si l'export existe</small></span>
-                        </label>
-                        <label class="checkbox-label" for="cleanArchive">
-                            <input type="checkbox" id="cleanArchive">
-                            <span><strong>Nettoyer l'archive des sources</strong><br>
-                            <small>Vider l'archive des projets traités</small></span>
-                        </label>
-                        <label class="checkbox-label" for="cleanOutput">
-                            <input type="checkbox" id="cleanOutput">
-                            <span><strong>Nettoyer les sorties</strong><br>
-                            <small>Vider les exports publiés en attente de déplacement</small></span>
-                        </label>
-                    </div>
+                    <fieldset class="options-fieldset">
+                        <legend class="sr-only">Options d'export</legend>
+                        <div class="checkbox-group">
+                            <label class="checkbox-label" for="forceOverwrite">
+                                <input type="checkbox" id="forceOverwrite">
+                                <span><strong>Forcer l'écrasement</strong><br>
+                                <small>Soumettre même si l'export existe</small></span>
+                            </label>
+                            <label class="checkbox-label" for="cleanArchive">
+                                <input type="checkbox" id="cleanArchive">
+                                <span><strong>Nettoyer l'archive des sources</strong><br>
+                                <small>Vider l'archive des projets traités</small></span>
+                            </label>
+                            <label class="checkbox-label" for="cleanOutput">
+                                <input type="checkbox" id="cleanOutput">
+                                <span><strong>Nettoyer les sorties</strong><br>
+                                <small>Vider les exports publiés en attente de déplacement</small></span>
+                            </label>
+                        </div>
+                    </fieldset>
                 </div>
 
                 <div class="control-section">
@@ -156,7 +174,7 @@
                         <span id="logCount">0 lignes</span>
                     </div>
                 </div>
-                <div class="log-content" id="logContent" role="log" aria-live="off" aria-atomic="false">
+                <div class="log-content" id="logContent" role="log" aria-live="off" aria-atomic="false" tabindex="0" aria-label="Console des journaux d'exécution">
                     <div class="empty-state">
                         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
@@ -165,7 +183,7 @@
                     </div>
                 </div>
                 <!-- Bouton intelligent retour en bas -->
-                <button type="button" id="scrollToBottomBtn" class="btn-scroll-bottom" aria-label="Retourner en bas">
+                <button type="button" id="scrollToBottomBtn" class="btn-scroll-bottom" aria-label="Retourner en bas" hidden>
                     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <polyline points="6 9 12 15 18 9"></polyline>
                     </svg>
@@ -174,6 +192,16 @@
             </div>
         </main>
     </div>
+
+    <!-- Confirmation non bloquante (UX-F02) : le flux SSE et les timers continuent de tourner. -->
+    <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmDialogTitle" aria-describedby="confirmDialogMessage">
+        <h2 id="confirmDialogTitle" class="confirm-dialog-title">Confirmation</h2>
+        <p id="confirmDialogMessage" class="confirm-dialog-message"></p>
+        <form method="dialog" class="confirm-dialog-actions">
+            <button type="submit" value="cancel" class="btn-secondary">Annuler</button>
+            <button type="submit" value="confirm" class="btn-danger" id="confirmDialogConfirm">Confirmer</button>
+        </form>
+    </dialog>
 
     <noscript>
         <div class="noscript-banner" role="alert">
