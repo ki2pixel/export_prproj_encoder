@@ -9,9 +9,14 @@ Il surveille `WATCH_OUT` et rapproche chaque MP4 de sa soumission.
   jamais ; chaque événement est délégué à un pool de threads borné (`MAX_PROCESSING_THREADS = 8`)
   avec déduplication par chemin (`processing_paths`).
 - **Balayage initial** au démarrage : les `*.mp4` déjà présents à la racine de `WATCH_OUT` sont
-  traités (reprise après un arrêt entre la publication et le déplacement).
+  soumis au pool de threads (et non traités synchronement dans le thread de surveillance), comme
+  les événements watchdog.
 - **Rescan périodique** (`RESCAN_INTERVAL_SECONDS`, 60 s par défaut, 0 = désactivé) : filet de
-  sécurité si un événement inotify est perdu (montages FUSE/réseau).
+  sécurité si un événement inotify est perdu (montages FUSE/réseau). Chaque fichier est également
+  délégué au pool : un déplacement long (stabilisation + réessais) ne fige jamais la boucle.
+- **Redémarrage de l'observateur** : si `Observer` meurt, il est recréé mais l'instance
+  `ExportHandler` et son `ThreadPoolExecutor` sont **réutilisés** (pas de pool orphelin ni de perte
+  des chemins en cours de traitement).
 - **Stabilisation** avant tout traitement : `STABLE_FILE_CHECKS` × `STABLE_FILE_INTERVAL` (2 × 5 s) de
   taille inchangée, plafonné à 7 tentatives. Elle est **sautée pour les exports publiés par
   l'encodeur** : leur nom contient un `job_id` et la base les donne au statut `EXPORT_DONE*`, ce qui
@@ -29,11 +34,13 @@ Il surveille `WATCH_OUT` et rapproche chaque MP4 de sa soumission.
    retenu si le statut est *appariable* (`is_matchable_status()` :
    `SUBMITTED_TO_WATCHFOLDER`, `EXPORT_ENCODING`, `EXPORT_DONE`, `EXPORT_DONE_WITH_WARNINGS`) — un
    export déjà déplacé (`EXPORT_MOVED_TO_FINAL`) n'est pas retraité.
-2. **Heuristique** (filet de sécurité, `ENABLE_HEURISTIC_MATCHING=True`) : comparaison du stem du
-   fichier aux candidats issus des soumissions en attente (`{stem}_export`, variante « slugifiée »,
-   stem du fichier déposé dans `WATCH_IN`, stem attendu) avec normalisation (accents, casse,
-   séparateurs). Une correspondance heuristique est journalisée en majuscules : c'est le signe d'un
-   nommage inattendu, à vérifier.
+2. **Heuristique** (filet de sécurité, `ENABLE_HEURISTIC_MATCHING=True`) : le `job_id` est retiré
+   du nom du MP4 (`strip_job_id()`) avant `get_base_export_stem()`, puis le stem est comparé aux
+   candidats issus des soumissions en attente (`{stem}_export`, variante « slugifiée », stem du
+   fichier déposé dans `WATCH_IN`, stem attendu) avec normalisation (accents, casse, séparateurs).
+   Sans ce retrait, un MP4 portant un `job_id` orphelin (base réinitialisée, ligne supprimée) ne
+   pouvait jamais être rapproché. Une correspondance heuristique est journalisée en majuscules :
+   c'est le signe d'un nommage inattendu, à vérifier.
 3. **Aucune correspondance** :
    - `ENABLE_FALLBACK_MOVE=False` (défaut) : le fichier part en **quarantaine**
      (`WATCH_OUT/quarantine/`, versionné s'il y a collision) pour inspection ;
@@ -45,17 +52,27 @@ Il surveille `WATCH_OUT` et rapproche chaque MP4 de sa soumission.
 - Destination : `resolve_project_root(row['OriginalFilePath'])` (dossier du projet, ex.
   `/mnt/cache/117 Camille`), nom final `{ExpectedExportName}{OUTPUT_EXTENSION}` (le suffixe
   technique `_assist` est retiré du nom final).
+- **Origine `WATCH_IN`** : un projet adopté/déposé directement dans `/…/WATCH_IN` n'a pas de dossier
+  client d'origine. `resolve_project_root()` retomberait sur `APP_ROOT` (racine du code Python) :
+  le moniteur ne l'appelle jamais dans ce cas et applique la politique de repli (quarantaine par
+  défaut, dossier `BASE_SCAN_FOLDER` le plus récent si `ENABLE_FALLBACK_MOVE=True`).
 - **Collision** : `ALLOW_OVERWRITE=False` (défaut) ⇒ versionnage `_v1`, `_v2`… ; `ALLOW_OVERWRITE=True`
   ⇒ écrasement atomique (le remplacement se fait par `os.replace`, la cible n'est jamais absente).
+  La sélection du nom final et sa **réservation** sont protégées par `destination_lock` et
+  `reserved_destinations` : deux threads du pool ne peuvent pas choisir la même cible `_vN`.
 - **`move_to_final_verified()`** :
   - même système de fichiers ⇒ `os.replace()` (atomique, instantané) ;
-  - systèmes de fichiers différents (ext4 → NTFS/FUSE) ⇒ copie vers `.<nom>.part` **sur la
-    destination**, vérification de la taille, `os.replace()` (donc jamais de fichier partiel visible
-    sous son nom final), puis suppression de la source. Le `.part` est nettoyé en cas d'échec.
+  - systèmes de fichiers différents (ext4 → NTFS/FUSE) ⇒ copie vers
+    `.<nom>.<pid>_<thread>.part` **sur la destination** (nom unique par opération), vérification de
+    la taille (égale à la source et non nulle), `os.fsync()` du descripteur, puis `os.replace()`
+    (donc jamais de fichier partiel visible sous son nom final) et suppression de la source. Le
+    `.part` est nettoyé en cas d'échec.
 - **Réessais** : `MOVE_RETRY_COUNT` × `MOVE_RETRY_DELAY` (12 × 10 s) sur `PermissionError`/`OSError`
   (fichier verrouillé, disque lent).
 - **Statuts** : `EXPORT_MOVED_TO_FINAL` en cas de succès, `EXPORT_FAILED_TO_MOVE` après épuisement
-  des réessais (mise à jour par `job_id`, avec repli sur la ligne complète).
+  des réessais (mise à jour par `job_id`, avec repli sur la ligne complète). Un export issu d'un
+  projet `WATCH_IN` placé en quarantaine est marqué `EXPORT_FAILED_TO_MOVE` (destination finale
+  inconnue), ce qui évite de le retraiter indéfiniment.
 
 ## Journal
 

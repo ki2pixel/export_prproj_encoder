@@ -147,10 +147,18 @@ class ProcessRegistry:
 
 
 def _terminate_process_group(process, grace_seconds: float) -> None:
-    """Arrête un process lancé avec start_new_session=True (SIGTERM puis SIGKILL sur le groupe)."""
+    """Arrête tout le groupe de processus lancé avec start_new_session=True.
+
+    `process.wait()` ne concerne que le parent Python (prproj2ffmpeg.py) : un enfant
+    ffmpeg du même groupe peut survivre au SIGTERM. On sonde donc le groupe via
+    os.killpg(pgid, 0) jusqu'à sa disparition complète, puis on escalade en SIGKILL.
+    """
     try:
         pgid = os.getpgid(process.pid)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
+        # Le parent a pu être réapé entre-temps ; start_new_session garantit pgid == pid.
+        pgid = process.pid
+    except PermissionError:
         return
 
     def _signal_group(sig) -> None:
@@ -159,12 +167,23 @@ def _terminate_process_group(process, grace_seconds: float) -> None:
         except (ProcessLookupError, PermissionError):
             pass
 
+    deadline = time.monotonic() + max(0.1, float(grace_seconds))
     _signal_group(signal.SIGTERM)
     try:
-        process.wait(timeout=grace_seconds)
-        return
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         pass
+
+    # Même si le parent est mort immédiatement, le groupe peut encore contenir ffmpeg.
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            break
+        time.sleep(0.05)
+
     _signal_group(signal.SIGKILL)
     try:
         process.wait(timeout=5)

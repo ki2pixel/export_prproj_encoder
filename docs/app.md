@@ -10,12 +10,21 @@ fond et lance la soumission en sous-processus.
      fort généré et affiché en console si `API_PASSWORD` est vide).
    - Rate-limiting du login : 5 échecs par IP sur 5 minutes glissantes, blocage 5 minutes,
      délai constant de 0,5 s sur tout échec (anti-énumération), réponses 401 uniformes.
-   - Jeton CSRF de session (`_csrf_token`) exigé sur toute requête mutative (`csrf_protect`),
-     comparé en temps constant (`hmac.compare_digest`) ; rotation de session à la connexion.
+     Le dictionnaire `_login_failures` est purgé sous verrou et plafonné à
+     `MAX_TRACKED_LOGIN_IPS` (4096) : au-delà, l'IP la plus ancienne est évincée (FIFO), ce qui
+     borne la mémoire face à une rafale d'IP distinctes.
+   - Identifiants comparés en temps constant (`hmac.compare_digest`) ; jeton CSRF de session
+     (`_csrf_token`) exigé sur toute requête mutative (`csrf_protect`). À la connexion réussie :
+     `session.clear()`, régénération explicite du jeton CSRF et session permanente (anti-fixation).
    - Cookies `HttpOnly`, `SameSite=Lax`, `Secure` dès que le serveur n'écoute pas en loopback,
      session de 8 h. En-têtes `Content-Security-Policy`, `X-Content-Type-Options`,
      `Referrer-Policy`, `X-Frame-Options` sur toutes les réponses.
+   - `/logout` accepte `GET` et `POST` : un `POST` exige le jeton CSRF, un `GET` portant
+     `Sec-Fetch-Site: cross-site` est refusé (une balise `<img>` tierce ne peut pas déconnecter).
    - `/api/health` est la seule route non authentifiée, et elle refuse tout client non loopback.
+     Elle refuse aussi les en-têtes de proxy (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`) sans
+     session authentifiée : derrière un reverse proxy local, `remote_addr` vaut toujours
+     `127.0.0.1` et la restriction loopback serait sinon contournée.
 
 2. **Console de logs temps réel (SSE)** : `LogPublisher` (Pub/Sub thread-safe, 50 clients maximum,
    file de 500 messages avec écartement des plus anciens) ; `/api/logs/stream` diffuse, heartbeat
@@ -28,9 +37,14 @@ fond et lance la soumission en sous-processus.
    - l'**encodeur** (`encoder_worker.start_encoder`) tourne dans un second thread daemon ;
    - la **soumission** est lancée par `subprocess.Popen([sys.executable, submit_to_watchfolder.py])`
      sous `process_lock` (anti-double démarrage) ; la sortie est lue en binaire par
-     `monitor_process_output` (décodage UTF-8 tolérant) et diffusée en SSE ;
-   - `atexit` arrête proprement l'encodeur (abandon du job en cours) et le moniteur ;
-     un gestionnaire `SIGTERM`/`SIGINT` déclenche le même arrêt propre.
+     `monitor_process_output` (décodage UTF-8 tolérant, `stdout` fermé dans `finally`) et
+     diffusée en SSE ;
+   - `/api/stop` récupère la référence du sous-processus sous `process_lock` puis exécute
+     `terminate()`/`wait()`/`kill()` **hors verrou** : `/api/status` et le thread de lecture des
+     logs ne sont jamais bloqués pendant l'attente ;
+   - `atexit` termine le sous-processus de soumission s'il est encore actif, puis arrête
+     proprement l'encodeur (abandon du job en cours) et le moniteur ; un gestionnaire
+     `SIGTERM`/`SIGINT` déclenche le même arrêt propre.
 
 ## API
 
@@ -38,8 +52,8 @@ fond et lance la soumission en sous-processus.
 |---|---|---|
 | `/` | GET | page principale (auth requise) |
 | `/login` | GET, POST | formulaire / connexion (CSRF requis en POST) |
-| `/logout` | GET | destruction de session |
-| `/api/health` | GET | `{"status": "ok"}` (loopback uniquement, 403 sinon) |
+| `/logout` | GET, POST | destruction de session (POST avec CSRF ; GET cross-site refusé) |
+| `/api/health` | GET | `{"status": "ok"}` (loopback uniquement, sans proxy non authentifié ; 403 sinon) |
 | `/api/status` | GET | `{running, monitor_running, encoder:{running, paused, queue_pending, current_job, current_file, current_started_at, processed, failed, aborted, encoder_available, encoder_engine, last_error}}` |
 | `/api/start` | POST | `{force, clean_source_archive, clean_outputs}` (booléens stricts) → lance la soumission et reprend l'encodeur |
 | `/api/stop` | POST | arrête la soumission (`terminate()` puis `kill()` après 5 s) et met l'encodeur en pause en abandonnant le job en cours |

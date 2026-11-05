@@ -12,8 +12,10 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import types
 import unittest
@@ -34,6 +36,7 @@ from config import (
     STATUS_DONE_WITH_WARNINGS,
     STATUS_ENCODING,
     STATUS_FAILED,
+    STATUS_MOVE_FAILED,
     STATUS_MOVED,
     STATUS_SUBMITTED,
     STATUS_SUPERSEDED,
@@ -78,8 +81,14 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.base_folder.mkdir(exist_ok=True)
 
     def tearDown(self):
-        # Nettoyage du bac à sable
+        # Nettoyage du bac à sable (les liens symboliques doivent être retirés avant les dossiers)
         if self.base_folder.exists():
+            for item in self.base_folder.glob("**/*"):
+                if item.is_symlink():
+                    try:
+                        item.unlink()
+                    except Exception:
+                        pass
             for item in self.base_folder.glob("**/*"):
                 if item.is_file():
                     try:
@@ -985,8 +994,8 @@ class TestAMEWatchfolder(unittest.TestCase):
 
         self.assertFalse(source.exists())
         self.assertEqual(destination.read_bytes(), b"y" * 256)
-        # Aucun fichier .part résiduel
-        self.assertEqual(list(self.base_folder.glob(".dest.mp4.part")), [])
+        # Aucun fichier .part résiduel (nom unique par PID/thread)
+        self.assertEqual(list(self.base_folder.glob(".*.part")), [])
 
     def test_move_to_final_verified_echec_nettoie_le_part(self):
         source = self.base_folder / "source.mp4"
@@ -999,7 +1008,7 @@ class TestAMEWatchfolder(unittest.TestCase):
                 move_to_final_verified(source, destination)
 
         self.assertTrue(source.exists())
-        self.assertEqual(list(self.base_folder.glob(".dest.mp4.part")), [])
+        self.assertEqual(list(self.base_folder.glob(".*.part")), [])
 
     def test_is_same_filesystem(self):
         file_a = self.base_folder / "a.bin"
@@ -1551,6 +1560,386 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.assertEqual(collected, [[a1], [a2_valid]])
 
 
+    # --- Correctifs d'audit backend (2026-11-05) ---
+
+    def test_ensure_submission_ignore_fichier_recent_non_en_base(self):
+        """C-01 : un .prproj fraîchement copié sans ligne SQLite n'est pas adopté avec WATCH_IN."""
+        import encoder_worker
+        from db_helper import get_submission_by_job_id, init_db
+
+        watch_in = self.base_folder / "WATCH_IN"
+        watch_in.mkdir()
+        db_path = self.base_folder / "jobs.db"
+        init_db(db_path)
+
+        source = self.base_folder / "projet.prproj"
+        source.write_bytes(b"contenu")
+        old_time = time.time() - 3600
+        os.utime(source, (old_time, old_time))
+        job_id = "20261013_120000_abc123"
+
+        with patch("submit_to_watchfolder.SUBMISSION_LOG_FILE", self.base_folder / "submission.csv"), \
+             patch("submit_to_watchfolder.SUBMISSION_TEXT_LOG_FILE", self.base_folder / "submission.txt"):
+            self.assertTrue(stw.copy_to_watchfolder_root(source, watch_in, job_id))
+
+        copied = watch_in / f"projet_{job_id}.prproj"
+        self.assertTrue(copied.exists())
+        # copy2 aurait conservé l'ancien mtime : la publication doit le remettre à maintenant.
+        self.assertLess(time.time() - copied.stat().st_mtime, 5.0)
+
+        with patch("encoder_worker.JOBS_DB_FILE", db_path), \
+             patch("encoder_worker.ENCODER_RECENT_SUBMISSION_GRACE_SECONDS", 5.0):
+            returned_job, row, _path = encoder_worker._ensure_submission(copied)
+
+        self.assertIsNone(returned_job)
+        self.assertIsNone(row)
+        self.assertIsNone(get_submission_by_job_id(db_path, job_id))
+
+    def test_terminate_process_group_tue_les_enfants_survivants(self):
+        """P-01 : le SIGTERM tue le parent, le SIGKILL doit atteindre l'enfant qui l'ignore."""
+        from prproj_engine import _terminate_process_group
+
+        pid_file = self.base_folder / "child.pid"
+        parent_script = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+            "open(sys.argv[1], 'w').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+        parent = subprocess.Popen(
+            [sys.executable, "-c", parent_script, str(pid_file)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        child_pid = None
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline and not pid_file.exists():
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "le processus enfant n'a pas démarré")
+            child_pid = int(pid_file.read_text().strip())
+
+            _terminate_process_group(parent, grace_seconds=0.5)
+            parent.wait(timeout=2)
+
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("le processus enfant ffmpeg a survécu au SIGKILL du groupe")
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_concurrent_versioned_moves_sans_collision(self):
+        """C-02 : 4 déplacements simultanés vers la même cible produisent _v1.._v3 sans collision."""
+        from monitor_exports_and_move import ExportHandler
+
+        handler = ExportHandler()
+        target = self.base_folder / "dest.mp4"
+        count = 4
+        sources = []
+        for index in range(count):
+            source = self.base_folder / f"source_{index}.mp4"
+            source.write_bytes(bytes([index + 1]) * 32)
+            sources.append(source)
+
+        barrier = threading.Barrier(count)
+        results = []
+        failures = []
+
+        def worker(source_path: Path):
+            try:
+                barrier.wait(timeout=5)
+                destination = handler._reserve_destination(target)
+                try:
+                    move_to_final_verified(source_path, destination)
+                    results.append(destination.name)
+                finally:
+                    handler._release_destination(destination)
+            except Exception as exc:  # pragma: no cover - remonté dans l'assertion
+                failures.append(exc)
+
+        try:
+            with patch("monitor_exports_and_move._is_same_filesystem", return_value=False):
+                threads = [threading.Thread(target=worker, args=(path,)) for path in sources]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+            self.assertEqual(failures, [])
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+        finally:
+            handler.executor.shutdown(wait=False)
+
+        self.assertEqual(
+            sorted(results),
+            ["dest.mp4", "dest_v1.mp4", "dest_v2.mp4", "dest_v3.mp4"])
+        for name in ("dest.mp4", "dest_v1.mp4", "dest_v2.mp4", "dest_v3.mp4"):
+            self.assertTrue((self.base_folder / name).exists(), name)
+        self.assertEqual(list(self.base_folder.glob(".*.part")), [])
+
+    def test_resolve_media_bloque_path_traversal_et_symlinks(self):
+        """S-01 : .. filtré et liens symboliques hors base refusés."""
+        engine = load_prproj2ffmpeg()
+        engine._resolve_cache.clear()
+
+        base = self.base_folder / "media"
+        base.mkdir(exist_ok=True)
+        outside = self.base_folder / "outside"
+        outside.mkdir(exist_ok=True)
+        secret = outside / "secret.mp4"
+        secret.write_bytes(b"secret")
+
+        self.assertIsNone(engine.resolve_media(r"F:\..\..\secret.mp4", [str(base)]))
+
+        direct_link = base / "lien.mp4"
+        os.symlink(secret, direct_link)
+        self.assertIsNone(engine.resolve_media(r"F:\lien.mp4", [str(base)]))
+
+        directory_link = base / "lien_dossier"
+        os.symlink(outside, directory_link)
+        self.assertIsNone(engine.resolve_media(r"F:\lien_dossier\secret.mp4", [str(base)]))
+
+    def test_login_rate_limiting_borne_memoire_et_purge(self):
+        """S-02 : le dictionnaire est plafonné et un blocage expiré est purgé."""
+        import app as app_module
+
+        try:
+            with app_module._login_failures_lock:
+                app_module._login_failures.clear()
+            for index in range(app_module.MAX_TRACKED_LOGIN_IPS + 20):
+                app_module._record_login_failure(f"10.0.{index // 256}.{index % 256}")
+            with app_module._login_failures_lock:
+                self.assertLessEqual(
+                    len(app_module._login_failures), app_module.MAX_TRACKED_LOGIN_IPS)
+
+            now = time.time()
+            with app_module._login_failures_lock:
+                app_module._login_failures["bloquee"] = {
+                    "count": app_module.LOGIN_MAX_ATTEMPTS,
+                    "first_ts": now - app_module.LOGIN_ATTEMPT_WINDOW_SECONDS - 1,
+                    "blocked_until": now - 1,
+                }
+            self.assertFalse(app_module._is_login_blocked("bloquee"))
+            with app_module._login_failures_lock:
+                self.assertNotIn("bloquee", app_module._login_failures)
+        finally:
+            with app_module._login_failures_lock:
+                app_module._login_failures.clear()
+
+    def test_heuristic_matching_avec_job_id_orphelin(self):
+        """R-03 : le job_id du MP4 est retiré avant la comparaison heuristique."""
+        from db_helper import add_submission, init_db
+        from monitor_exports_and_move import ExportHandler
+
+        db_path = self.base_folder / "jobs.db"
+        init_db(db_path)
+        project_dir = self.base_folder / "project1"
+        projets_dir = project_dir / "projets"
+        projets_dir.mkdir(parents=True)
+        out_dir = self.base_folder / "WATCH_OUT"
+        out_dir.mkdir()
+
+        known_job = "20261013_120000_aaaaaa"
+        orphan_job = "20261013_120000_bbbbbb"
+        add_submission(
+            db_path, "2026-10-13 12:00:00",
+            str(projets_dir / "Projet_9x16.prproj"),
+            f"Projet_9x16_{known_job}.prproj",
+            "Projet_9x16", known_job, status=STATUS_DONE)
+
+        exported = out_dir / f"Projet_9x16_{orphan_job}.mp4"
+        exported.write_bytes(b"video")
+
+        handler = ExportHandler()
+        try:
+            with patch("monitor_exports_and_move.JOBS_DB_FILE", db_path), \
+                 patch("monitor_exports_and_move.MONITOR_LOG_FILE", self.base_folder / "monitor_log.txt"), \
+                 patch("monitor_exports_and_move.resolve_project_root", return_value=project_dir), \
+                 patch.object(handler, "_wait_for_stability", return_value=True):
+                handler.process_file(str(exported))
+        finally:
+            handler.executor.shutdown(wait=False)
+
+        self.assertFalse(exported.exists())
+        self.assertTrue((project_dir / "Projet_9x16.mp4").exists())
+
+    def test_manual_watch_in_project_never_moves_to_app_root(self):
+        """R-01 : un projet adopté depuis WATCH_IN part en quarantaine, jamais dans APP_ROOT."""
+        from db_helper import add_submission, get_submission_by_job_id, init_db
+        from monitor_exports_and_move import ExportHandler
+
+        db_path = self.base_folder / "jobs.db"
+        init_db(db_path)
+        watch_in = self.base_folder / "WATCH_IN"
+        watch_in.mkdir()
+        out_dir = self.base_folder / "WATCH_OUT"
+        out_dir.mkdir()
+
+        job_id = "20261013_120000_cccccc"
+        original = watch_in / f"Manuel_{job_id}.prproj"
+        original.write_bytes(b"projet")
+        add_submission(
+            db_path, "2026-10-13 12:00:00", str(original),
+            original.name, "Manuel", job_id, status=STATUS_DONE)
+
+        exported = out_dir / f"Manuel_{job_id}.mp4"
+        exported.write_bytes(b"video")
+
+        handler = ExportHandler()
+        try:
+            with patch("monitor_exports_and_move.JOBS_DB_FILE", db_path), \
+                 patch("monitor_exports_and_move.MONITOR_LOG_FILE", self.base_folder / "monitor_log.txt"), \
+                 patch("monitor_exports_and_move.WATCH_FOLDER_INPUT", watch_in), \
+                 patch("monitor_exports_and_move.WATCH_FOLDER_OUTPUT", out_dir), \
+                 patch("monitor_exports_and_move.ENABLE_FALLBACK_MOVE", False), \
+                 patch("monitor_exports_and_move.resolve_project_root",
+                       side_effect=AssertionError("resolve_project_root interdit pour WATCH_IN")):
+                handler.process_file(str(exported))
+        finally:
+            handler.executor.shutdown(wait=False)
+
+        quarantined = out_dir / "quarantine" / exported.name
+        self.assertTrue(quarantined.exists())
+        self.assertFalse((Path(__file__).parent / exported.name).exists())
+        row = get_submission_by_job_id(db_path, job_id)
+        self.assertEqual(row['Status'], STATUS_MOVE_FAILED)
+
+    def test_sweep_delegue_au_pool_sans_bloquer(self):
+        """R-02 : le balayage initial passe par le pool, pas par le thread de surveillance."""
+        from monitor_exports_and_move import ExportHandler, sweep_existing_exports
+
+        out_dir = self.base_folder / "WATCH_OUT"
+        out_dir.mkdir()
+        exported = out_dir / "export.mp4"
+        exported.write_bytes(b"video")
+
+        handler = ExportHandler()
+        done = threading.Event()
+        seen = []
+
+        def fake_process(path):
+            seen.append(path)
+            done.set()
+
+        try:
+            with patch("monitor_exports_and_move.WATCH_FOLDER_OUTPUT", out_dir), \
+                 patch.object(handler, "process_file", side_effect=fake_process):
+                sweep_existing_exports(handler, "test")
+                self.assertTrue(done.wait(timeout=2), "le fichier n'a pas été délégué au pool")
+        finally:
+            handler.executor.shutdown(wait=False)
+        self.assertEqual(seen, [str(exported)])
+
+    def test_prproj_gzip_plafonne(self):
+        """S-03 : une bombe gzip dépasse le plafond et lève une erreur explicite."""
+        engine = load_prproj2ffmpeg()
+        payload = b"<root>" + b"a" * 4096 + b"</root>"
+        bomb = self.base_folder / "bombe.prproj"
+        bomb.write_bytes(gzip.compress(payload))
+
+        with patch.object(engine, "_MAX_PRPROJ_XML_BYTES", 1024):
+            with self.assertRaises(ValueError):
+                engine._read_prproj_xml_bytes(str(bomb))
+
+    def test_db_wal_active(self):
+        """C-04 : les connexions SQLite sont ouvertes en mode WAL."""
+        from db_helper import get_db_connection
+
+        conn = get_db_connection(self.base_folder / "jobs.db")
+        try:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            self.assertEqual(str(mode).lower(), "wal")
+        finally:
+            conn.close()
+
+    def test_publication_statut_done_avant_replace(self):
+        """C-03 : le moniteur doit lire EXPORT_DONE avant l'événement inotify du os.replace."""
+        import encoder_worker
+        from db_helper import add_submission, get_submission_by_job_id, init_db
+        from prproj_engine import EncodeSettings, ExportResult
+
+        out_dir = self.base_folder / "WATCH_OUT"
+        staging = out_dir / ".staging"
+        staging.mkdir(parents=True)
+        db_path = self.base_folder / "jobs.db"
+        init_db(db_path)
+        job_id = "20261013_120000_dddddd"
+        add_submission(
+            db_path, "2026-10-13 12:00:00", str(self.base_folder / "projet.prproj"),
+            f"projet_{job_id}.prproj", "projet", job_id, status=STATUS_SUBMITTED)
+
+        prproj = self.base_folder / f"projet_{job_id}.prproj"
+        prproj.write_bytes(b"projet")
+        staging_file = staging / f"projet_{job_id}.mp4"
+        staging_file.write_bytes(b"video")
+
+        seen_statuses = []
+        real_replace = os.replace
+
+        def fake_replace(src, dst):
+            row = get_submission_by_job_id(db_path, job_id)
+            seen_statuses.append(row['Status'] if row else None)
+            return real_replace(src, dst)
+
+        settings = EncodeSettings(bitrate="10M", encoder="auto")
+        with patch.multiple(
+                encoder_worker,
+                JOBS_DB_FILE=db_path,
+                WATCH_FOLDER_OUTPUT=out_dir,
+                WATCH_FOLDER_INPUT=self.base_folder / "WATCH_IN",
+                EXPORT_LOG_DIRECTORY=self.base_folder / "exports",
+                ENCODER_LOG_FILE=self.base_folder / "encoder_log.txt"), \
+             patch.object(encoder_worker, "read_project_info", return_value=None), \
+             patch.object(encoder_worker, "expected_output_bytes", return_value=None), \
+             patch.object(encoder_worker, "_archive_source", return_value=True), \
+             patch.object(encoder_worker, "run_export", return_value=ExportResult(
+                 returncode=0, aborted=False, duration_seconds=1.0,
+                 output_path=staging_file, output_size=staging_file.stat().st_size)), \
+             patch.object(encoder_worker.os, "replace", side_effect=fake_replace):
+            status = encoder_worker._process_job(
+                prproj, job_id, {'OriginalFilePath': str(prproj)}, settings,
+                self.base_folder / "prproj2ffmpeg.py")
+
+        self.assertEqual(status, STATUS_DONE)
+        self.assertEqual(seen_statuses, [STATUS_DONE])
+        self.assertTrue((out_dir / f"projet_{job_id}.mp4").exists())
+
+    def test_archivage_en_echec_ne_loggue_qu_une_fois(self):
+        """R-04 : un archivage impossible ne produit pas une ligne toutes les 2 s."""
+        import encoder_worker
+
+        prproj = self.base_folder / "projet_20261013_120000_eeeeee.prproj"
+        prproj.write_bytes(b"projet")
+        messages = []
+
+        def fake_log(message):
+            messages.append(message)
+
+        try:
+            with encoder_worker._unarchivable_lock:
+                encoder_worker._unarchivable_paths.clear()
+            with patch.object(encoder_worker, "WATCH_FOLDER_INPUT", self.base_folder / "WATCH_IN"), \
+                 patch.object(encoder_worker, "log_encoder_message", side_effect=fake_log), \
+                 patch.object(encoder_worker.shutil, "move", side_effect=OSError("permission refusée")):
+                self.assertFalse(encoder_worker._archive_source(prproj))
+                self.assertFalse(encoder_worker._archive_source(prproj))
+            self.assertEqual(
+                len([m for m in messages if "impossible d'archiver" in m]), 1)
+        finally:
+            with encoder_worker._unarchivable_lock:
+                encoder_worker._unarchivable_paths.discard(prproj)
+
+
 class TestFlaskSmoke(unittest.TestCase):
     """Smoke test de l'application Flask (contrats API, CSP, auth, statut de l'encodeur)."""
 
@@ -1615,6 +2004,34 @@ class TestFlaskSmoke(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.client.get('/logout')
+
+    def test_health_refuse_proxy_non_authentifie(self):
+        """S-04 : un proxy local ne doit pas contourner la restriction loopback de /api/health."""
+        response = self.client.get('/api/health', headers={'X-Forwarded-For': '203.0.113.10'})
+        self.assertEqual(response.status_code, 403)
+
+    def test_logout_refuse_cross_site_et_post_sans_csrf(self):
+        """S-04 : GET cross-site et POST sans CSRF ne déconnectent pas la session."""
+        token = self._form_token(self.client.get('/login').get_data(as_text=True))
+        response = self.client.post('/login', data={
+            'username': self.config_module.API_USER,
+            'password': self.config_module.API_PASSWORD,
+            'csrf_token': token,
+        })
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.get('/logout', headers={'Sec-Fetch-Site': 'cross-site'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.get('/api/status').status_code, 200)
+
+        response = self.client.post('/logout')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.get('/api/status').status_code, 200)
+
+        token = self._csrf_token('/')
+        response = self.client.post('/logout', headers={'X-CSRF-Token': token})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.client.get('/api/status').status_code, 401)
 
     def test_page_html_non_mise_en_cache(self):
         response = self.client.get('/login')

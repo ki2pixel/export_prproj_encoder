@@ -192,6 +192,11 @@ def monitor_process_output(process):
     except Exception as e:
         publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ERREUR lors du monitoring: {str(e)}")
     finally:
+        try:
+            if process.stdout is not None:
+                process.stdout.close()
+        except Exception:
+            pass
         with process_lock:
             # Réinitialiser seulement si le processus en cours d'affichage est toujours celui-ci
             if current_process == process:
@@ -207,6 +212,25 @@ LOGIN_BLOCK_DURATION_SECONDS = 300      # Durée de blocage après dépassement 
 
 _login_failures = {}                    # ip -> {"count": int, "first_ts": float, "blocked_until": float}
 _login_failures_lock = threading.Lock()
+# Plafond mémoire du rate-limiter : au-delà, les IP les plus anciennes sont évincées (FIFO).
+MAX_TRACKED_LOGIN_IPS = 4096
+
+
+def _prune_login_failures_unlocked(now: float) -> None:
+    """Purge les entrées expirées puis borne le dictionnaire (appel sous _login_failures_lock)."""
+    expired = []
+    for ip, data in _login_failures.items():
+        blocked_until = data.get("blocked_until")
+        if blocked_until:
+            if now >= blocked_until:
+                expired.append(ip)
+        elif now - data.get("first_ts", now) > LOGIN_ATTEMPT_WINDOW_SECONDS:
+            expired.append(ip)
+    for ip in expired:
+        del _login_failures[ip]
+    while len(_login_failures) >= MAX_TRACKED_LOGIN_IPS:
+        oldest_ip = next(iter(_login_failures))
+        del _login_failures[oldest_ip]
 
 
 def _is_login_blocked(client_ip: str) -> bool:
@@ -216,8 +240,12 @@ def _is_login_blocked(client_ip: str) -> bool:
         entry = _login_failures.get(client_ip)
         if not entry:
             return False
-        if entry.get("blocked_until") and now < entry["blocked_until"]:
-            return True
+        blocked_until = entry.get("blocked_until")
+        if blocked_until:
+            if now < blocked_until:
+                return True
+            del _login_failures[client_ip]
+            return False
         if now - entry["first_ts"] > LOGIN_ATTEMPT_WINDOW_SECONDS:
             del _login_failures[client_ip]
             return False
@@ -227,6 +255,8 @@ def _is_login_blocked(client_ip: str) -> bool:
 def _record_login_failure(client_ip: str):
     with _login_failures_lock:
         now = time.time()
+        if len(_login_failures) >= MAX_TRACKED_LOGIN_IPS:
+            _prune_login_failures_unlocked(now)
         entry = _login_failures.get(client_ip)
         if not entry or now - entry["first_ts"] > LOGIN_ATTEMPT_WINDOW_SECONDS:
             entry = {"count": 0, "first_ts": now, "blocked_until": None}
@@ -303,11 +333,16 @@ def login_route():
             return render_template('login.html', error="Jeton de sécurité invalide. Rechargez la page et réessayez.",
                                    csrf_token=_generate_csrf_token()), 403
 
-        if username == API_USER and password == current_api_password:
+        user_ok = hmac.compare_digest(
+            (username or '').encode('utf-8'), str(API_USER).encode('utf-8'))
+        pass_ok = hmac.compare_digest(
+            (password or '').encode('utf-8'), str(current_api_password).encode('utf-8'))
+        if user_ok and pass_ok:
             _clear_login_failures(client_ip)
             session.clear()  # Rotation de session : invalide toute session antérieure (anti-session-fixation)
             session['logged_in'] = True
             session.permanent = True
+            session['_csrf_token'] = secrets.token_hex(32)
             return redirect(url_for('index'))
         else:
             # Délai constant sur échec : uniformise le temps de réponse (anti-énumération)
@@ -322,9 +357,16 @@ def login_route():
     return render_template('login.html', error=None, csrf_token=_generate_csrf_token())
 
 
-@app.route('/logout')
+@app.route('/logout', methods=['GET', 'POST'])
 def logout_route():
-    """Déconnexion"""
+    """Déconnexion (POST protégé par CSRF ; GET refusé depuis un site tiers)."""
+    if request.method == 'POST':
+        token = request.headers.get('X-CSRF-Token', '') or request.form.get('csrf_token', '')
+        if not _validate_csrf_token(token):
+            return jsonify({'error': 'Jeton CSRF invalide ou manquant'}), 403
+    elif request.headers.get('Sec-Fetch-Site') == 'cross-site':
+        # Une balise <img src="…/logout"> ne doit pas pouvoir déconnecter l'utilisateur.
+        return jsonify({'error': 'Déconnexion cross-site refusée'}), 403
     session.clear()
     return redirect(url_for('login_route'))
 
@@ -338,10 +380,15 @@ def index():
 
 @app.route('/api/health')
 def health_check():
-    """Route de santé non sensible, accessible uniquement depuis localhost (127.0.0.1 ou ::1)"""
+    """Route de santé accessible uniquement depuis localhost, hors proxy inverse non authentifié."""
     client_ip = request.remote_addr
     if client_ip not in ('127.0.0.1', '::1', 'localhost'):
         return jsonify({'error': 'Access restricted to localhost'}), 403
+    proxy_headers = ('X-Forwarded-For', 'X-Real-IP', 'Forwarded')
+    if any(request.headers.get(name) for name in proxy_headers) and not session.get('logged_in'):
+        # Derrière un proxy local, remote_addr vaut toujours 127.0.0.1 : sans cette
+        # vérification, toute requête externe relayée contournerait la restriction.
+        return jsonify({'error': 'Access via proxy refused without authentication'}), 403
     return jsonify({'status': 'ok'}), 200
 
 
@@ -456,27 +503,35 @@ def stop_script():
     """Arrête le script de soumission et met l'encodeur en pause (abandon du job en cours)"""
     global current_process, script_running
 
-    aborted_job = False
+    # Lire la référence sous verrou, puis attendre la fin du processus HORS verrou :
+    # wait(timeout=5) ne doit pas bloquer /api/status ni monitor_process_output.
     with process_lock:
-        if script_running:
-            if current_process is None:
-                # Le thread a été lancé mais le sous-processus n'a pas encore été créé (phase d'initialisation)
-                publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Script arrêté pendant la phase d'initialisation.")
-            else:
-                try:
-                    current_process.terminate()
-                    try:
-                        current_process.wait(timeout=5)
-                        publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Script de soumission arrêté proprement par l'utilisateur")
-                    except subprocess.TimeoutExpired:
-                        publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] AVERTISSEMENT: Le script n'a pas répondu à terminate(). Forçage de l'arrêt (kill)...")
-                        current_process.kill()
-                        current_process.wait(timeout=2)
-                        publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Script arrêté de force (kill)")
-                except Exception as e:
-                    return jsonify({'success': False, 'message': f'Erreur lors de l\'arrêt: {str(e)}'}), 500
+        running = script_running
+        proc = current_process
+
+    if running:
+        if proc is None:
+            # Le thread a été lancé mais le sous-processus n'a pas encore été créé (phase d'initialisation)
+            publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Script arrêté pendant la phase d'initialisation.")
         else:
-            publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Aucun script de soumission en cours : mise en pause de l'encodeur uniquement.")
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                    publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Script de soumission arrêté proprement par l'utilisateur")
+                except subprocess.TimeoutExpired:
+                    publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] AVERTISSEMENT: Le script n'a pas répondu à terminate(). Forçage de l'arrêt (kill)...")
+                    proc.kill()
+                    proc.wait(timeout=2)
+                    publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Script arrêté de force (kill)")
+                with process_lock:
+                    if current_process is proc:
+                        current_process = None
+                        script_running = False
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'Erreur lors de l\'arrêt: {str(e)}'}), 500
+    else:
+        publisher.announce(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Aucun script de soumission en cours : mise en pause de l'encodeur uniquement.")
 
     # Mise en pause de l'encodeur (abandon propre du job en cours d'encodage, s'il y en a un)
     aborted_job = encoder_worker.pause_and_abort()
@@ -636,7 +691,27 @@ if __name__ == '__main__':
 
     @atexit.register
     def stop_background_threads():
-        print("Arrêt de l'encodeur et du moniteur d'exports...")
+        print("Arrêt de la soumission, de l'encodeur et du moniteur d'exports...")
+        # Le sous-processus de soumission doit être terminé explicitement : sans cela,
+        # SIGTERM/atexit laisserait un orphelin écrire dans WATCH_IN et jobs.db.
+        global current_process, script_running
+        with process_lock:
+            proc = current_process
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+        with process_lock:
+            if current_process is proc:
+                current_process = None
+                script_running = False
+
         encoder_worker.shutdown()
         encoder_stop_event.set()
         if encoder_thread is not None:

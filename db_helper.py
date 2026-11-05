@@ -20,10 +20,26 @@ _COLUMNS = (
 
 
 def get_db_connection(db_path: Path):
-    """Retourne une connexion à la base SQLite (timeout large pour absorber les accès concurrents)."""
+    """Retourne une connexion SQLite en mode WAL (accès concurrents multi-acteurs).
+
+    Le mode WAL autorise lectures et écritures simultanées ; `busy_timeout` absorbe les
+    verrous résiduels. Certains systèmes de fichiers ne supportent pas WAL : la connexion
+    reste alors utilisable avec le journal par défaut.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
+    for pragma in (
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA synchronous=NORMAL",
+        "PRAGMA busy_timeout=30000",
+    ):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            # FS réseau/FUSE sans WAL : on conserve la connexion avec le journal par défaut.
+            # Les autres pragmas (busy_timeout) restent appliqués indépendamment.
+            pass
     return conn
 
 

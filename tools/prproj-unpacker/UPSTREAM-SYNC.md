@@ -5,6 +5,9 @@
 `967affb14a5f6028b651814628ec99da3b91c7625b00208d5075339983a6c2b0`) est introuvable depuis le
 2026-10-13. C'est ce fichier que l'application exécute (`PRPROJ2FFMPEG_SCRIPT`).
 
+Empreinte actuelle de la copie de référence (2026-11-05, durcissement sécurité inclus) :
+`612e16563e1ebdd79e273b493e217ec311c3e046c4687f8703ab0b1c8657e0a6`.
+
 ## Procédure de synchronisation (quand la source sera retrouvée)
 
 1. Comparer les empreintes : si la source retrouvée est bien l'original `967affb1…`, elle peut
@@ -113,6 +116,15 @@
     élargie de 4σ, crop pair et décalage de l'`overlay`. Les overlays flous masqués ou animés
     restent en composition. Cas réel (overlay 596 %, flou 50, dernier segment) :
     11446×6439 → 2289×1562, 31,3 s → 3,8 s sur 2 s (PSNR 52,3 dB / SSIM 0,9993).
+16. **Durcissement sécurité backend (2026-11-05)** :
+    - `resolve_media()` filtre `'.'`/`'..'`, refuse les liens symboliques et vérifie le confinement
+      canonique (`os.path.realpath` + `os.path.commonpath`) avant de retourner un média.
+    - la décompression `.prproj` est plafonnée à 256 Mio (`_MAX_PRPROJ_XML_BYTES`,
+      `gzip.GzipFile(...).read(limite + 1)`) : une bombe gzip lève une erreur propre au lieu de
+      saturer la RAM.
+    - les fichiers temporaires du cache alpha (`.tmp.mov`, `.bbox.json.tmp`, sidecar
+      `.qtrle.json.<pid>.tmp`) incluent le PID pour éviter toute collision entre un benchmark et
+      le worker. Le suffixe `.bbox.json.tmp` est conservé pour la purge des orphelins.
 
 ## Limites connues de la copie actuelle
 

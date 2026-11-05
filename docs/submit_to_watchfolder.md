@@ -23,7 +23,8 @@ Script lancé en sous-processus par l'application (et utilisable seul en ligne d
    (`Adobe Premiere Pro Auto-Save`… ) sont donc ignorés par construction, tout comme les fichiers
    temporaires de Premiere (`*.prproj~`, `*.prproj.lck`), qui ne correspondent pas au motif.
    Chaque chemin est validé par `is_safe_path()` (rejet des liens symboliques et de toute sortie de
-   l'arborescence scannée).
+   l'arborescence scannée). La liste finale est triée (`sorted(set(...))`) : l'ordre de soumission
+   est déterministe d'une exécution à l'autre.
    - **Priorité `_assist`** : dans un même dossier, si `X_assist.prproj` et `X.prproj` coexistent,
      seule la variante `_assist` est retenue (le fichier normal ignoré est journalisé). Une assist
      orpheline, sans version normale, est conservée et exportée normalement.
@@ -42,6 +43,8 @@ Script lancé en sous-processus par l'application (et utilisable seul en ligne d
    (`resolve_project_root(prproj) / nom_attendu.mp4`) le projet est ignoré, sauf `--force`.
 7. **Copie atomique** (`copy_to_watchfolder_root`) vers `WATCH_IN` sous le nom
    `{stem}_{job_id}.prproj` : copie en `.tmp`, vérification de la taille, puis `rename()`.
+   Le `mtime` du fichier publié est remis à l'heure courante (`os.utime`) : `copy2` préserverait
+   celui du projet source, ce qui fausserait le garde-fou anti-adoption prématurée et l'ordre FIFO.
    Le `job_id` a le format `AAAAMMJJ_HHMMSS_ffffff` (6 caractères hexadécimaux) — c'est la clé de
    rapprochement utilisée ensuite par l'encodeur et le moniteur.
 8. **Garde-fou file d'attente** : après la copie d'une variante `_assist`, les soumissions de la
@@ -49,8 +52,11 @@ Script lancé en sous-processus par l'application (et utilisable seul en ligne d
    (transition conditionnelle en base). L'encodeur les archive sans les encoder, ce qui évite un
    `X.mp4` suivi de `X_v1.mp4`. Une normale déjà `EXPORT_ENCODING` ou `EXPORT_DONE` n'est jamais
    modifiée : un avertissement est journalisé.
-9. **Journalisation** : `add_submission()` en base + ligne CSV structurée + messages dans le journal
-   texte.
+9. **Journalisation** : `add_submission()` en base immédiatement après la copie, ligne CSV
+   structurée (écriture protégée par `fcntl.flock`, deux soumissions ne peuvent pas entrelacer
+   leurs lignes) + messages dans le journal texte. Si l'insertion SQLite échoue et qu'aucune ligne
+   n'existe pour le `job_id`, la copie est retirée de `WATCH_IN` : jamais de `.prproj` orphelin dans
+   la file active sans `OriginalFilePath` fiable.
 
 ## Journaux produits
 

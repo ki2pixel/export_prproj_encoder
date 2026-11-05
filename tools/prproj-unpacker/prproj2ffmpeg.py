@@ -14,6 +14,7 @@ import argparse
 import base64
 import gzip
 import hashlib
+import io
 import json
 import math
 import os
@@ -28,6 +29,8 @@ import zlib
 TICKS = 254016000000
 CACHE_ROOT = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'),
                           'prproj2ffmpeg')
+# Plafond de sécurité contre les bombes gzip : au-delà, le DOM ElementTree ferait OOM.
+_MAX_PRPROJ_XML_BYTES = 256 * 1024 * 1024
 
 
 def die(msg):
@@ -626,13 +629,25 @@ def resolve_media(win_path, bases):
     if cache_key in _resolve_cache:
         return _resolve_cache[cache_key]
     norm = win_path.replace('\\', '/').replace(':', '')
-    parts = [p for p in norm.split('/') if p]
+    # Ne jamais laisser un segment relatif remonter au-dessus de la base autorisée.
+    parts = [p for p in norm.split('/') if p and p not in ('.', '..')]
     for base in bases:
+        real_base = os.path.realpath(str(base))
         for skip in range(0, len(parts)):
-            cand = os.path.join(str(base), *parts[skip:])
-            if os.path.isfile(cand):
-                _resolve_cache[cache_key] = cand
-                return cand
+            cand = os.path.join(real_base, *parts[skip:])
+            if os.path.islink(cand):
+                # Un lien symbolique dans l'arborescence projet ne doit pas faire entrer
+                # un média extérieur (ou un fichier système) dans le rendu.
+                continue
+            real_cand = os.path.realpath(cand)
+            try:
+                if os.path.commonpath([real_cand, real_base]) != real_base:
+                    continue
+            except ValueError:
+                continue
+            if os.path.isfile(real_cand):
+                _resolve_cache[cache_key] = real_cand
+                return real_cand
     _resolve_cache[cache_key] = None
     return None
 
@@ -1143,7 +1158,7 @@ def _write_alpha_meta(mov_path, source, cap, duration):
         'duration': duration,
     }
     meta_path = _alpha_meta_path(mov_path)
-    tmp = meta_path + '.tmp'
+    tmp = meta_path + f'.{os.getpid()}.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as fh:
             json.dump(data, fh)
@@ -1380,7 +1395,9 @@ def alpha_intermediate(path):
         if cached is None:
             key = keys[-1]
             cached = os.path.join(CACHE_ROOT, key + '.mov')
-            tmp = cached + '.tmp.mov'
+            # PID dans le nom : un benchmark et le worker peuvent préparer le même média
+            # simultanément sans écrire dans le même fichier temporaire.
+            tmp = cached + f'.{os.getpid()}.tmp.mov'
             coverage = 'durée complète' if convert_full else f'0-{cap:.1f} s'
             started = time.monotonic()
             print(f"[cache] conversion alpha 8 bits de '{os.path.basename(path)}' "
@@ -1489,7 +1506,8 @@ def _bbox_cache_write(path, tag, box):
     if not keys:
         return
     fp = os.path.join(CACHE_ROOT, keys[-1] + '.bbox.json')
-    tmp = fp + '.tmp'
+    # Suffixe conservé `.bbox.json.tmp` (purge des orphelins) + PID (pas de collision).
+    tmp = fp + f'.{os.getpid()}.bbox.json.tmp'
     try:
         os.makedirs(CACHE_ROOT, exist_ok=True)
         with open(tmp, 'w') as fh:
@@ -2109,6 +2127,22 @@ def _select_encoder(forced=None):
     return 'h264_nvenc'
 
 
+def _read_prproj_xml_bytes(src_path):
+    """Lit le XML d'un .prproj, décompressé en mémoire, avec plafond anti-bombe gzip."""
+    with open(src_path, 'rb') as f:
+        raw = f.read()
+    if raw[:2] == b'\x1f\x8b':
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode='rb') as gz:
+            data = gz.read(_MAX_PRPROJ_XML_BYTES + 1)
+    else:
+        data = raw[:_MAX_PRPROJ_XML_BYTES + 1]
+    if len(data) > _MAX_PRPROJ_XML_BYTES:
+        raise ValueError(
+            f"projet XML trop volumineux après décompression "
+            f"(> {_MAX_PRPROJ_XML_BYTES // (1024 * 1024)} Mio)")
+    return data
+
+
 def main():
     ap = argparse.ArgumentParser(description='Export a Premiere .prproj XML sequence to MP4 with ffmpeg.')
     ap.add_argument('input', help='.prproj or unpacked .xml file')
@@ -2124,14 +2158,13 @@ def main():
     src = os.path.abspath(args.input)
     try:
         if src.lower().endswith('.prproj'):
-            # Decompression en memoire : aucun fichier temporaire sur le dossier source.
-            with open(src, 'rb') as f:
-                raw = f.read()
-            xml_bytes = gzip.decompress(raw) if raw[:2] == b'\x1f\x8b' else raw
+            # Decompression en memoire, plafonnee : aucun fichier temporaire sur le
+            # dossier source et pas de bombe gzip capable de saturer la RAM.
+            xml_bytes = _read_prproj_xml_bytes(src)
             parsed = Project(src, xml_bytes=xml_bytes)
         else:
             parsed = Project(src)
-    except (OSError, gzip.BadGzipFile, EOFError, ET.ParseError, zlib.error) as exc:
+    except (OSError, gzip.BadGzipFile, EOFError, ET.ParseError, zlib.error, ValueError) as exc:
         die(f"lecture du projet impossible: {exc}")
 
     if not parsed.sequences:

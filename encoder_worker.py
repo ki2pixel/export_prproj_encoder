@@ -27,6 +27,7 @@ from config import (
     ENCODER_LOG_FILE,
     ENCODER_POLL_INTERVAL,
     ENCODER_PROGRESS_INTERVAL,
+    ENCODER_RECENT_SUBMISSION_GRACE_SECONDS,
     EXPORT_LOG_DIRECTORY,
     INPUT_EXTENSIONS,
     JOBS_DB_FILE,
@@ -71,6 +72,11 @@ log_callback = None
 _log_lock = threading.Lock()
 _state_lock = threading.Lock()
 _registry = ProcessRegistry()
+
+# Projets à statut terminal dont l'archivage a échoué : ne pas réessayer (ni journaliser)
+# à chaque cycle de scrutation de 2 s. Une entrée est retirée si le fichier disparaît.
+_unarchivable_paths: set[Path] = set()
+_unarchivable_lock = threading.Lock()
 
 _state = {
     'paused': False,
@@ -189,16 +195,37 @@ def _list_pending_files():
     return [path for _, path in sorted(files, key=lambda item: (item[0], item[1].name))]
 
 
-def _archive_source(prproj_path: Path) -> None:
-    """Déplace le projet consommé dans WATCH_IN/Source/<horodatage>/ (≡ archive des sources d'AME)."""
+def _is_unarchivable(prproj_path: Path) -> bool:
+    with _unarchivable_lock:
+        return prproj_path in _unarchivable_paths
+
+
+def _archive_source(prproj_path: Path) -> bool:
+    """Déplace le projet consommé dans WATCH_IN/Source/<horodatage>/ (≡ archive des sources d'AME).
+
+    Retourne False si le déplacement a échoué. L'échec n'est journalisé qu'une fois : le
+    chemin est mémorisé pour ne pas produire une ligne de log toutes les 2 s.
+    """
+    if _is_unarchivable(prproj_path):
+        return False
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S')
     destination_dir = WATCH_FOLDER_INPUT / SOURCE_ARCHIVE_DIRNAME / timestamp
     try:
         destination_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(prproj_path), str(destination_dir / prproj_path.name))
+        with _unarchivable_lock:
+            _unarchivable_paths.discard(prproj_path)
         log_encoder_message(f"  Projet archivé dans '{destination_dir}'")
+        return True
     except Exception as e:
-        log_encoder_message(f"  AVERTISSEMENT: impossible d'archiver '{prproj_path.name}' : {type(e).__name__} - {e}")
+        with _unarchivable_lock:
+            already_reported = prproj_path in _unarchivable_paths
+            _unarchivable_paths.add(prproj_path)
+        if not already_reported:
+            log_encoder_message(
+                f"  AVERTISSEMENT: impossible d'archiver '{prproj_path.name}' : "
+                f"{type(e).__name__} - {e} (nouvelle tentative désactivée jusqu'au redémarrage)")
+        return False
 
 
 def _ensure_submission(prproj_path: Path):
@@ -212,6 +239,14 @@ def _ensure_submission(prproj_path: Path):
         row = get_submission_by_job_id(JOBS_DB_FILE, job_id)
         if row:
             return job_id, row, prproj_path
+        # Un fichier tout juste renommé par submit_to_watchfolder.py peut être visible
+        # avant son insertion SQLite : ne pas l'adopter avec le chemin WATCH_IN (C-01).
+        try:
+            age = time.time() - prproj_path.stat().st_mtime
+        except OSError:
+            return None, None, prproj_path
+        if age < ENCODER_RECENT_SUBMISSION_GRACE_SECONDS:
+            return None, None, prproj_path
         expected_stem = build_expected_export_stem(prproj_path)
         log_submission_action(prproj_path, prproj_path.name, expected_stem, job_id)
         return job_id, get_submission_by_job_id(JOBS_DB_FILE, job_id), prproj_path
@@ -342,6 +377,15 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
         return STATUS_ABORTED
 
     if result.output_ready:
+        # Le statut DONE doit être visible AVANT la publication atomique : l'événement
+        # inotify du os.replace réveille le moniteur, qui saute alors la stabilisation (C-03).
+        status_updated = False
+        try:
+            status_updated = update_submission_status_by_job_id(JOBS_DB_FILE, job_id, STATUS_DONE)
+        except Exception as e:
+            log_encoder_message(
+                f"  AVERTISSEMENT: impossible de passer le job {job_id} à '{STATUS_DONE}' avant publication : {e}")
+
         # Promotion atomique dans le dossier surveillé par le moniteur (même système de fichiers)
         try:
             os.replace(staging_path, published_path)
@@ -358,7 +402,14 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
                             f"{result.output_size / 1_000_000:.1f} Mo → dépôt dans '{WATCH_FOLDER_OUTPUT.name}' pour déplacement final.")
         log_encoder_message(f"  Journal complet de l'encodage : '{export_log_path}'")
 
-        update_submission_status_by_job_id(JOBS_DB_FILE, job_id, STATUS_DONE)
+        if not status_updated:
+            # Repli après publication : le fichier est complet, le moniteur le déplacera
+            # même si le statut n'a pas pu être écrit avant l'événement inotify.
+            try:
+                update_submission_status_by_job_id(JOBS_DB_FILE, job_id, STATUS_DONE)
+            except Exception as e:
+                log_encoder_message(
+                    f"  AVERTISSEMENT: impossible de passer le job {job_id} à '{STATUS_DONE}' après publication : {e}")
         _bump('processed')
         _archive_source(prproj_path)
         return STATUS_DONE
@@ -378,6 +429,10 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
 
 def _pick_next_job():
     """Retourne (chemin réel, job_id, ligne) du prochain job à encoder, ou (None, None, None)."""
+    with _unarchivable_lock:
+        for stale_path in [path for path in _unarchivable_paths if not path.exists()]:
+            _unarchivable_paths.discard(stale_path)
+
     for prproj_path in _list_pending_files():
         job_id, row, job_path = _ensure_submission(prproj_path)
         if not job_id or not row:
@@ -387,14 +442,16 @@ def _pick_next_job():
             # Statut déjà avancé : soit la sortie existe (le moniteur va la déplacer),
             # soit l'encodage s'est achevé sans laisser de fichier → on refait le job.
             if (WATCH_FOLDER_OUTPUT / f"{job_path.stem}{OUTPUT_EXTENSION}").exists():
-                log_encoder_message(f"Job {job_id} déjà encodé (sortie déjà dans '{WATCH_FOLDER_OUTPUT.name}') : projet archivé sans réencodage.")
+                if not _is_unarchivable(job_path):
+                    log_encoder_message(f"Job {job_id} déjà encodé (sortie déjà dans '{WATCH_FOLDER_OUTPUT.name}') : projet archivé sans réencodage.")
                 _archive_source(job_path)
                 continue
             log_encoder_message(f"Job {job_id} marqué '{status}' mais aucune sortie trouvée : réencodage.")
         elif status not in (STATUS_SUBMITTED, STATUS_ENCODING):
             # Statut terminal (échec, abandon, déplacement effectué) : ne jamais réencoder en boucle.
             # Une nouvelle soumission (option « Forcer l'écrasement ») crée un nouveau job_id.
-            log_encoder_message(f"Job {job_id} au statut '{status}' : projet archivé sans encodage.")
+            if not _is_unarchivable(job_path):
+                log_encoder_message(f"Job {job_id} au statut '{status}' : projet archivé sans encodage.")
             _archive_source(job_path)
             continue
         return job_path, job_id, row

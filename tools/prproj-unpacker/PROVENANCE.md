@@ -10,7 +10,7 @@ Copie vendorisée depuis le dépôt de conception de l'auteur (outil maison) :
 
 | Fichier | SHA-256 | État |
 | --- | --- | --- |
-| `prproj2ffmpeg.py` | `382d1de016066074cc489a7dddab5ffd932ea4d1e2ff3d6bed63b21c515b2591` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04)** (voir ci-dessous) |
+| `prproj2ffmpeg.py` | `612e16563e1ebdd79e273b493e217ec311c3e046c4687f8703ab0b1c8657e0a6` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04) + durcissement sécurité backend (2026-11-05)** (voir ci-dessous) |
 | `unpack.pl` | `e8aa19fccb148f86160eda3f3da0d5644cc7b435753010e0ef318e269997fbab` | copie conforme |
 | `README.md` | `bf50cdb6bbde672a4df542d39f3c9cd71183827faaf409d59088248eb4f85dfa` | copie **+ documentation des correctifs d'audit (2026-10-23) + Frame Hold et fenêtre floue (2026-11-04)** |
 | `LICENSE` | `09c65776ef866a5f0c184a5c52331807e954ba74c074b62e3617884ef864ad8b` | copie conforme |
@@ -178,6 +178,19 @@ Empreinte de l'original (avant modifications) :
     `scale=11446:6439` + `gblur` plein cadre → `crop=384:262:1300:0` + `scale=2289:1562` ;
     2 s du segment **31,3 s → 3,8 s** (PSNR 52,3 dB / SSIM 0,9993 face au rendu complet).
 
+16. **Durcissement sécurité backend (2026-11-05)** — application des constats de
+    `docs/audits/Audit_de_sécurité_et_de_robustesse_backend.md` :
+    - **S-01 `resolve_media()`** : filtrage des segments `'.'`/`'..'`, rejet des liens symboliques
+      et vérification canonique `os.path.commonpath([real_cand, real_base]) == real_base` ; le
+      chemin retourné est le chemin réel confiné sous la base. Aucun média hors de `/mnt/cache` (ou
+      des bases explicitement fournies) ne peut plus être lu ou sondé via un XML piégé.
+    - **S-03 décompression** : lecture plafonnée à `_MAX_PRPROJ_XML_BYTES` (256 Mio) via
+      `gzip.GzipFile(fileobj=io.BytesIO(raw)).read(limite + 1)` ; au-delà, `ValueError` explicite
+      convertie en `error:` propre. Une bombe gzip ne peut plus déclencher l'OOM Killer.
+    - **P-03 temporaires** : suffixe `os.getpid()` sur les fichiers `.tmp.mov`, `.bbox.json.tmp`
+      (suffixe conservé pour la purge des orphelins) et les sidecars `.qtrle.json` : un benchmark
+      concurrent et le worker n'écrivent plus dans le même fichier temporaire.
+
 **Validation** : W9 `mask_blur` (masque sur le 3ᵉ clip + flou sur le 4ᵉ) conforme aux captures
 Premiere ; Mabille : 3 masques sur la piste V2, split screens cadrés et synchronisés (apparition à
 la première image) ; projet 138 sans masque identique au rendu d'avant la fonctionnalité (SSIM :
@@ -223,6 +236,12 @@ machine, cache chaud). Le poster du Frame Hold est désormais fixe : SSIM 0,126 
 bruit d'encodage). Hors dernier segment, les frames à 10/60/150/300/460 s sont **bit-à-bit
 identiques** à l'export précédent (SSIM 1,0). Sur 2 s du dernier segment, le graphe flou passe
 de 31,3 s à **3,8 s** (PSNR 52,3 dB / SSIM 0,9993 face au rendu complet). Tests unitaires 78/78.
+
+**Validation 2026-11-05 (durcissement sécurité backend)** : suite `unittest` **92/92**.
+Benchmark A/B `tools/benchmark_export.py` sur `68 Camille` / `6ter - De l'autre côté du
+périph_9x16_assist` (3 s, `h264_nvenc`, cache chaud) : préparation **0,61 s → 0,64 s** et rendu
+**0,98 s → 0,98 s** (médiane), soit aucun impact mesurable. Les tests S-01/S-03/P-03 couvrent le
+confinement des médias, le plafond gzip et la lisibilité des temporaires suffixés par PID.
 
 ## Procédure de synchronisation avec la source
 

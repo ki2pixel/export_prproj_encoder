@@ -14,6 +14,7 @@ Options CLI :
 import argparse
 import csv
 import datetime
+import fcntl
 import os
 import re
 import shutil
@@ -50,6 +51,7 @@ from config import (
 from db_helper import (
     add_submission,
     get_matchable_submissions,
+    get_submission_by_job_id,
     init_db,
     update_submission_status_if_current,
 )
@@ -128,22 +130,32 @@ def initialize_submission_log_if_needed():
 
 
 def log_submission_action(original_file_path: Path, watchfolder_file_name: str, expected_export_name: str,
-                          job_id: str, status: str = STATUS_SUBMITTED):
+                          job_id: str, status: str = STATUS_SUBMITTED) -> bool:
+    """Enregistre la soumission en base et dans le CSV. Retourne True si SQLite a réussi."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    database_ok = True
     try:
         add_submission(JOBS_DB_FILE, timestamp, str(original_file_path), watchfolder_file_name, expected_export_name, job_id, status)
         log_message(f"DATABASE: Enregistré dans SQLite - {status} - {original_file_path.name} -> {watchfolder_file_name} (Expected Final Stem: {expected_export_name}, JobId: {job_id})")
     except Exception as e:
+        database_ok = False
         log_message(f"ERREUR: Impossible d'enregistrer la soumission dans SQLite: {e}")
 
-    # Écriture d'une ligne CSV structurée (journal lisible par tableur)
+    # Écriture d'une ligne CSV structurée (journal lisible par tableur), verrouillée
+    # entre processus : deux soumissions simultanées ne doivent pas entrelacer leurs lignes.
     try:
         SUBMISSION_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(SUBMISSION_LOG_FILE, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([timestamp, status, str(original_file_path), watchfolder_file_name, expected_export_name, job_id])
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, status, str(original_file_path), watchfolder_file_name, expected_export_name, job_id])
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except Exception as e:
         print(f"ERREUR: Impossible d'écrire la ligne CSV dans '{SUBMISSION_LOG_FILE}': {e}")
+    return database_ok
 
 
 def get_project_stem_without_prefix_and_copy_info(input_filename_with_ext: str) -> str:
@@ -356,7 +368,7 @@ def find_projects_to_process(base_scan_folder: Path, folder_keyword: str, force_
 
     if not prproj_to_submit_list:
         log_message(f"INFO: Aucun projet à soumettre après le scan de '{base_scan_folder}'.")
-    return list(set(prproj_to_submit_list))
+    return sorted(set(prproj_to_submit_list))
 
 
 def copy_to_watchfolder_root(source_path: Path, watch_folder_input: Path, job_id: str) -> bool:
@@ -383,6 +395,13 @@ def copy_to_watchfolder_root(source_path: Path, watch_folder_input: Path, job_id
         if destination_path.exists():
             destination_path.unlink()
         tmp_destination_path.rename(destination_path)
+        # copy2 préserve le mtime du projet source : on le remet à l'heure de publication
+        # pour que l'encodeur puisse distinguer une soumission en cours (C-01) et pour
+        # que la file FIFO respecte l'ordre réel des soumissions.
+        try:
+            os.utime(destination_path, None)
+        except OSError:
+            pass
         log_message(f"  COPIÉ : '{source_path.name}' vers '{watch_folder_input}' sous le nom '{unique_name}' (copie sécurisée et vérifiée)")
         return True
     except Exception as e:
@@ -586,10 +605,28 @@ if __name__ == "__main__":
             job_id = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
             success = copy_to_watchfolder_root(prproj_path, WATCH_FOLDER_INPUT, job_id)
             if success:
-                projects_successfully_submitted_count += 1
                 expected_export_stem_for_log = build_expected_export_stem(prproj_path)
                 unique_watchfolder_name = f"{prproj_path.stem}_{job_id}{prproj_path.suffix}"
-                log_submission_action(prproj_path, unique_watchfolder_name, expected_export_stem_for_log, job_id)
+                database_ok = log_submission_action(
+                    prproj_path, unique_watchfolder_name, expected_export_stem_for_log, job_id)
+                if not database_ok:
+                    # Ne jamais laisser un .prproj dans la file active sans ligne SQLite :
+                    # l'encodeur l'adopterait avec un OriginalFilePath erroné (WATCH_IN).
+                    try:
+                        existing_row = get_submission_by_job_id(JOBS_DB_FILE, job_id)
+                    except Exception:
+                        existing_row = None
+                    if existing_row is None:
+                        orphan_path = WATCH_FOLDER_INPUT / unique_watchfolder_name
+                        try:
+                            orphan_path.unlink(missing_ok=True)
+                            log_message(f"ERREUR: soumission '{unique_watchfolder_name}' retirée de "
+                                        f"'{WATCH_FOLDER_INPUT.name}' faute d'enregistrement SQLite.")
+                        except Exception as e_cleanup:
+                            log_message(f"ERREUR: impossible de retirer la copie orpheline "
+                                        f"'{orphan_path}': {e_cleanup}")
+                        continue
+                projects_successfully_submitted_count += 1
                 if is_assist_stem(strip_job_id(prproj_path.stem)):
                     supersede_pending_normal_jobs(prproj_path)
 

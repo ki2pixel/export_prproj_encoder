@@ -109,6 +109,9 @@ PRPROJ2FFMPEG_EXTRA_BASES = _env_paths("PRPROJ2FFMPEG_EXTRA_BASES", "")
 ENCODER_POLL_INTERVAL = _env_int("ENCODER_POLL_INTERVAL", 2)          # secondes
 ENCODER_PROGRESS_INTERVAL = _env_int("ENCODER_PROGRESS_INTERVAL", 5)  # secondes
 ENCODER_ABORT_GRACE_SECONDS = _env_int("ENCODER_ABORT_GRACE_SECONDS", 5)
+# Fenêtre pendant laquelle un .prproj portant un job_id mais absent de la base n'est pas
+# adopté par l'encodeur : laisse à submit_to_watchfolder.py le temps d'insérer sa ligne.
+ENCODER_RECENT_SUBMISSION_GRACE_SECONDS = _env_int("ENCODER_RECENT_SUBMISSION_GRACE_SECONDS", 5)
 
 # --- Surveillance / déplacement ---
 STABLE_FILE_CHECKS = _env_int("STABLE_FILE_CHECKS", 2)

@@ -39,6 +39,7 @@ from config import (
     STATUS_MOVE_FAILED,
     STATUS_MOVED,
     SUBMISSION_LOG_FILE,
+    WATCH_FOLDER_INPUT,
     WATCH_FOLDER_OUTPUT,
     is_matchable_status,
     resolve_project_root,
@@ -56,6 +57,7 @@ from filename_utils import (
     sanitize_filename_stem,
     slugify_like_ame,
     strip_assist_suffix,
+    strip_job_id,
 )
 
 try:
@@ -92,11 +94,13 @@ def log_monitor_message(message: str):
             print(f"ERREUR: Impossible d'écrire dans le fichier log du moniteur '{MONITOR_LOG_FILE}': {e}")
 
 
-def get_versioned_path(target_path: Path) -> Path:
+def get_versioned_path(target_path: Path, reserved=()) -> Path:
     """
-    Si target_path existe déjà, ajoute un suffixe de version comme _v1, _v2, etc., pour éviter l'écrasement.
+    Si target_path existe déjà (ou est déjà réservé par un autre thread), ajoute un
+    suffixe de version _v1, _v2, etc., pour éviter l'écrasement.
     """
-    if not target_path.exists():
+    reserved = reserved or ()
+    if not target_path.exists() and target_path not in reserved:
         return target_path
 
     stem = target_path.stem
@@ -115,7 +119,7 @@ def get_versioned_path(target_path: Path) -> Path:
     while True:
         version += 1
         new_path = parent / f"{base_stem}_v{version}{suffix}"
-        if not new_path.exists():
+        if not new_path.exists() and new_path not in reserved:
             return new_path
 
 
@@ -140,14 +144,23 @@ def move_to_final_verified(source_path: Path, destination_path: Path) -> None:
         os.replace(source_path, destination_path)
         return
 
-    temp_path = destination_path.parent / f".{destination_path.name}.part"
+    # Nom unique par processus/thread : deux copies inter-FS simultanées vers la même
+    # destination ne doivent jamais partager le même fichier temporaire (C-02).
+    temp_path = destination_path.parent / (
+        f".{destination_path.name}.{os.getpid()}_{threading.get_ident()}.part")
     try:
         shutil.copy2(source_path, temp_path)
-        if temp_path.stat().st_size != source_path.stat().st_size:
+        source_size = source_path.stat().st_size
+        copied_size = temp_path.stat().st_size
+        if copied_size != source_size or copied_size <= 0:
             raise OSError(
-                f"Taille incohérente après copie (source: {source_path.stat().st_size} octets, "
-                f"copie: {temp_path.stat().st_size} octets)"
+                f"Taille incohérente après copie (source: {source_size} octets, "
+                f"copie: {copied_size} octets)"
             )
+        # Les données doivent être sur le disque avant le renommage atomique : une
+        # coupure ou une déconnexion du partage ne doit pas laisser un MP4 tronqué.
+        with open(temp_path, "rb") as fh:
+            os.fsync(fh.fileno())
         os.replace(temp_path, destination_path)
         try:
             source_path.unlink()
@@ -155,8 +168,7 @@ def move_to_final_verified(source_path: Path, destination_path: Path) -> None:
             pass
     except Exception:
         try:
-            if temp_path.exists():
-                temp_path.unlink()
+            temp_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
@@ -204,7 +216,31 @@ class ExportHandler(FileSystemEventHandler):
         super().__init__()
         self.processing_lock = threading.Lock()
         self.processing_paths = set()
+        # Allocation atomique des noms finaux _v1/_v2 entre les threads du pool.
+        self.destination_lock = threading.Lock()
+        self.reserved_destinations: set[Path] = set()
         self.executor = ThreadPoolExecutor(max_workers=MAX_PROCESSING_THREADS, thread_name_prefix="export-process")
+
+    def _reserve_destination(self, preferred: Path, allow_overwrite: bool = False) -> Path:
+        """Réserve un chemin final libre (ou accepte l'écrasement) sous verrou."""
+        if allow_overwrite:
+            return preferred
+        with self.destination_lock:
+            destination = get_versioned_path(preferred, self.reserved_destinations)
+            self.reserved_destinations.add(destination)
+            return destination
+
+    def _release_destination(self, destination: Path) -> None:
+        with self.destination_lock:
+            self.reserved_destinations.discard(destination)
+
+    @staticmethod
+    def _is_under_watch_input(file_path: Path) -> bool:
+        """Vrai si le projet d'origine est un dépôt/adoption dans WATCH_IN."""
+        try:
+            return file_path.resolve().is_relative_to(WATCH_FOLDER_INPUT.resolve())
+        except (OSError, ValueError):
+            return False
 
     def _is_temporary_file(self, filename: str) -> bool:
         if re.match(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", Path(filename).stem):
@@ -356,7 +392,9 @@ class ExportHandler(FileSystemEventHandler):
                 f"  INFO: Fichier '{exported_file_path.name}' n'existe plus avant la recherche de correspondance. Ignoré.")
             return
 
-        stem_of_exported_file_cleaned = get_base_export_stem(exported_file_path.name)
+        # Le job_id doit être retiré avant la normalisation du stem, sinon le rapprochement
+        # heuristique compare un nom encore suffixé à des candidats qui ne le sont plus (R-03).
+        stem_of_exported_file_cleaned = get_base_export_stem(strip_job_id(exported_file_path.name))
         stem_of_exported_file_cleaned = sanitize_filename_stem(stem_of_exported_file_cleaned)
         log_monitor_message(f"  Stem exporté (nettoyé et sanitizé): '{stem_of_exported_file_cleaned}'")
 
@@ -436,34 +474,8 @@ class ExportHandler(FileSystemEventHandler):
                 log_monitor_message(f"    ERREUR lors du scan des entrées en attente : {e_read_db}")
 
         # 3) Traitement si correspondance trouvée
+        matched_submission_row_for_log_update = None
         if matched_row:
-            found_match_in_log = True
-            original_file_full_path = Path(matched_row['OriginalFilePath'])
-            final_destination_folder = resolve_project_root(original_file_full_path)
-
-            if not final_destination_folder.exists():
-                log_monitor_message(f"  Création du dossier de destination: '{final_destination_folder}'")
-                try:
-                    final_destination_folder.mkdir(parents=True, exist_ok=True)
-                except Exception as e_mkdir:
-                    log_monitor_message(f"  ERREUR CRITIQUE en créant le dossier '{final_destination_folder}': {e_mkdir}. Abandon.")
-                    return
-
-            # Nom final : la variante _assist ne doit jamais apparaître dans le MP4 livré, y compris
-            # pour une ligne de soumission créée avant l'introduction de cette règle.
-            final_target_filename = f"{sanitize_filename_stem(strip_assist_suffix(matched_row['ExpectedExportName']))}{OUTPUT_EXTENSION}"
-            final_destination_path = final_destination_folder / final_target_filename
-
-            # Gestion des collisions à destination
-            if final_destination_path.exists():
-                if ALLOW_OVERWRITE:
-                    log_monitor_message(f"  AVERTISSEMENT: Fichier '{final_destination_path}' existe déjà. ALLOW_OVERWRITE=True -> Écrasement.")
-                else:
-                    new_dest_path = get_versioned_path(final_destination_path)
-                    log_monitor_message(f"  COLLISION: Fichier de destination existe. ALLOW_OVERWRITE=False -> Versionnage: '{final_target_filename}' -> '{new_dest_path.name}'")
-                    final_destination_path = new_dest_path
-                    final_target_filename = final_destination_path.name
-
             matched_submission_row_for_log_update = {
                 'Timestamp': matched_row.get('Timestamp', ''),
                 'OriginalFilePath': matched_row.get('OriginalFilePath', ''),
@@ -471,33 +483,72 @@ class ExportHandler(FileSystemEventHandler):
                 'ExpectedExportName': matched_row.get('ExpectedExportName', ''),
                 'JobId': matched_row.get('JobId')
             }
+            original_file_full_path = Path(matched_row['OriginalFilePath'])
 
-            moved_successfully = False
-            for attempt in range(MOVE_RETRY_COUNT):
-                if not exported_file_path.exists():
-                    log_monitor_message(f"  INFO: Fichier source '{exported_file_path.name}' n'existe plus.")
-                    if final_destination_path.exists():
-                        log_monitor_message("  INFO: Fichier déjà présent à destination.")
-                        update_submission_log_status(matched_submission_row_for_log_update, STATUS_MOVED, final_target_filename)
-                        moved_successfully = True
-                    break
+            if self._is_under_watch_input(original_file_full_path):
+                # Projet déposé/adopté directement dans WATCH_IN : aucun dossier client
+                # d'origine. resolve_project_root() retomberait sur APP_ROOT (R-01) :
+                # on laisse la branche 4 (quarantaine ou repli BASE_SCAN_FOLDER) décider.
+                log_monitor_message(
+                    f"  AVERTISSEMENT: projet adopté depuis '{WATCH_FOLDER_INPUT.name}' "
+                    f"('{original_file_full_path}') : destination finale inconnue, "
+                    "traitement par quarantaine/repli.")
+            else:
+                found_match_in_log = True
+                final_destination_folder = resolve_project_root(original_file_full_path)
+
+                if not final_destination_folder.exists():
+                    log_monitor_message(f"  Création du dossier de destination: '{final_destination_folder}'")
+                    try:
+                        final_destination_folder.mkdir(parents=True, exist_ok=True)
+                    except Exception as e_mkdir:
+                        log_monitor_message(f"  ERREUR CRITIQUE en créant le dossier '{final_destination_folder}': {e_mkdir}. Abandon.")
+                        return
+
+                # Nom final : la variante _assist ne doit jamais apparaître dans le MP4 livré, y compris
+                # pour une ligne de soumission créée avant l'introduction de cette règle.
+                final_target_filename = f"{sanitize_filename_stem(strip_assist_suffix(matched_row['ExpectedExportName']))}{OUTPUT_EXTENSION}"
+                preferred_destination_path = final_destination_folder / final_target_filename
+                final_destination_path = self._reserve_destination(
+                    preferred_destination_path, allow_overwrite=ALLOW_OVERWRITE)
+
+                if final_destination_path != preferred_destination_path:
+                    log_monitor_message(
+                        f"  COLLISION: Fichier de destination existe/réservé. ALLOW_OVERWRITE=False -> "
+                        f"Versionnage: '{final_target_filename}' -> '{final_destination_path.name}'")
+                elif ALLOW_OVERWRITE and final_destination_path.exists():
+                    log_monitor_message(f"  AVERTISSEMENT: Fichier '{final_destination_path}' existe déjà. ALLOW_OVERWRITE=True -> Écrasement.")
+                final_target_filename = final_destination_path.name
+
+                moved_successfully = False
                 try:
-                    log_monitor_message(f"  Tentative de déplacement ({attempt + 1}/{MOVE_RETRY_COUNT}) vers '{final_destination_path}'...")
-                    move_to_final_verified(exported_file_path, final_destination_path)
-                    log_monitor_message("  SUCCÈS: Fichier déplacé.")
-                    update_submission_log_status(matched_submission_row_for_log_update, STATUS_MOVED, final_target_filename)
-                    moved_successfully = True
-                    break
-                except (PermissionError, OSError) as e_lock:
-                    log_monitor_message(f"  ERREUR déplacement: {e_lock}. Réessai dans {MOVE_RETRY_DELAY}s...")
-                    time.sleep(MOVE_RETRY_DELAY)
-                except Exception as e_move:
-                    log_monitor_message(f"  ERREUR inattendue: {e_move}. Réessai dans {MOVE_RETRY_DELAY}s...")
-                    time.sleep(MOVE_RETRY_DELAY)
+                    for attempt in range(MOVE_RETRY_COUNT):
+                        if not exported_file_path.exists():
+                            log_monitor_message(f"  INFO: Fichier source '{exported_file_path.name}' n'existe plus.")
+                            if final_destination_path.exists():
+                                log_monitor_message("  INFO: Fichier déjà présent à destination.")
+                                update_submission_log_status(matched_submission_row_for_log_update, STATUS_MOVED, final_target_filename)
+                                moved_successfully = True
+                            break
+                        try:
+                            log_monitor_message(f"  Tentative de déplacement ({attempt + 1}/{MOVE_RETRY_COUNT}) vers '{final_destination_path}'...")
+                            move_to_final_verified(exported_file_path, final_destination_path)
+                            log_monitor_message("  SUCCÈS: Fichier déplacé.")
+                            update_submission_log_status(matched_submission_row_for_log_update, STATUS_MOVED, final_target_filename)
+                            moved_successfully = True
+                            break
+                        except (PermissionError, OSError) as e_lock:
+                            log_monitor_message(f"  ERREUR déplacement: {e_lock}. Réessai dans {MOVE_RETRY_DELAY}s...")
+                            time.sleep(MOVE_RETRY_DELAY)
+                        except Exception as e_move:
+                            log_monitor_message(f"  ERREUR inattendue: {e_move}. Réessai dans {MOVE_RETRY_DELAY}s...")
+                            time.sleep(MOVE_RETRY_DELAY)
 
-            if not moved_successfully and exported_file_path.exists():
-                log_monitor_message(f"  ÉCHEC DÉFINITIF après {MOVE_RETRY_COUNT} essais.")
-                update_submission_log_status(matched_submission_row_for_log_update, STATUS_MOVE_FAILED, final_target_filename)
+                    if not moved_successfully and exported_file_path.exists():
+                        log_monitor_message(f"  ÉCHEC DÉFINITIF après {MOVE_RETRY_COUNT} essais.")
+                        update_submission_log_status(matched_submission_row_for_log_update, STATUS_MOVE_FAILED, final_target_filename)
+                finally:
+                    self._release_destination(final_destination_path)
 
         # 4) Repli ou quarantaine si aucun projet ne correspond dans la base
         if not found_match_in_log and exported_file_path.exists():
@@ -510,23 +561,30 @@ class ExportHandler(FileSystemEventHandler):
                     log_monitor_message(f"  ERREUR lors de la création du dossier de quarantaine: {e_quar_mkdir}")
                     return
 
-                quarantine_path = quarantine_folder / exported_file_path.name
-                quarantine_path = get_versioned_path(quarantine_path)
+                quarantine_path = self._reserve_destination(quarantine_folder / exported_file_path.name)
 
-                log_monitor_message(f"  AVERTISSEMENT: Pas de correspondance. ENABLE_FALLBACK_MOVE=False -> Quarantaine : '{quarantine_path}'")
+                log_monitor_message(
+                    f"  AVERTISSEMENT: Pas de destination finale connue. ENABLE_FALLBACK_MOVE=False "
+                    f"-> Quarantaine : '{quarantine_path}'")
 
                 moved_successfully = False
-                for attempt in range(MOVE_RETRY_COUNT):
-                    if not exported_file_path.exists():
-                        break
-                    try:
-                        move_to_final_verified(exported_file_path, quarantine_path)
-                        log_monitor_message("  SUCCÈS: Fichier déplacé en quarantaine.")
-                        moved_successfully = True
-                        break
-                    except Exception as e_quar_move:
-                        log_monitor_message(f"  ERREUR quarantaine: {e_quar_move}. Réessai...")
-                        time.sleep(MOVE_RETRY_DELAY)
+                try:
+                    for attempt in range(MOVE_RETRY_COUNT):
+                        if not exported_file_path.exists():
+                            break
+                        try:
+                            move_to_final_verified(exported_file_path, quarantine_path)
+                            log_monitor_message("  SUCCÈS: Fichier déplacé en quarantaine.")
+                            moved_successfully = True
+                            break
+                        except Exception as e_quar_move:
+                            log_monitor_message(f"  ERREUR quarantaine: {e_quar_move}. Réessai...")
+                            time.sleep(MOVE_RETRY_DELAY)
+                finally:
+                    self._release_destination(quarantine_path)
+                if moved_successfully and matched_submission_row_for_log_update is not None:
+                    update_submission_log_status(
+                        matched_submission_row_for_log_update, STATUS_MOVE_FAILED, quarantine_path.name)
             else:
                 # Comportement d'origine (avec versionnage obligatoire) : dossier projet le plus récent
                 log_monitor_message("  AVERTISSEMENT: Pas de correspondance. ENABLE_FALLBACK_MOVE=True -> Déplacement via fallback...")
@@ -553,27 +611,33 @@ class ExportHandler(FileSystemEventHandler):
                     final_destination_folder = chosen
 
                     final_target_filename = f"{stem_of_exported_file_cleaned}{OUTPUT_EXTENSION}"
-                    final_destination_path = final_destination_folder / final_target_filename
-
-                    # Versionnage sécurisé obligatoire en mode fallback
-                    if final_destination_path.exists():
-                        new_dest_path = get_versioned_path(final_destination_path)
-                        log_monitor_message(f"    Fallback collision: '{final_destination_path.name}' existe -> Versionnage: '{new_dest_path.name}'")
-                        final_destination_path = new_dest_path
+                    final_destination_path = self._reserve_destination(
+                        final_destination_folder / final_target_filename)
+                    if final_destination_path.name != final_target_filename:
+                        log_monitor_message(
+                            f"    Fallback collision: '{final_target_filename}' existe/réservé -> "
+                            f"Versionnage: '{final_destination_path.name}'")
+                    final_target_filename = final_destination_path.name
 
                     moved_successfully = False
-                    for attempt in range(MOVE_RETRY_COUNT):
-                        if not exported_file_path.exists():
-                            break
-                        try:
-                            log_monitor_message(f"    Fallback: Déplacement ({attempt + 1}/{MOVE_RETRY_COUNT}) vers '{final_destination_path}'...")
-                            move_to_final_verified(exported_file_path, final_destination_path)
-                            log_monitor_message("    Fallback: SUCCÈS: Fichier déplacé.")
-                            moved_successfully = True
-                            break
-                        except Exception as e_fb_move:
-                            log_monitor_message(f"    Fallback ERREUR: {e_fb_move}. Réessai...")
-                            time.sleep(MOVE_RETRY_DELAY)
+                    try:
+                        for attempt in range(MOVE_RETRY_COUNT):
+                            if not exported_file_path.exists():
+                                break
+                            try:
+                                log_monitor_message(f"    Fallback: Déplacement ({attempt + 1}/{MOVE_RETRY_COUNT}) vers '{final_destination_path}'...")
+                                move_to_final_verified(exported_file_path, final_destination_path)
+                                log_monitor_message("    Fallback: SUCCÈS: Fichier déplacé.")
+                                moved_successfully = True
+                                break
+                            except Exception as e_fb_move:
+                                log_monitor_message(f"    Fallback ERREUR: {e_fb_move}. Réessai...")
+                                time.sleep(MOVE_RETRY_DELAY)
+                    finally:
+                        self._release_destination(final_destination_path)
+                    if moved_successfully and matched_submission_row_for_log_update is not None:
+                        update_submission_log_status(
+                            matched_submission_row_for_log_update, STATUS_MOVED, final_target_filename)
                 except Exception as e_fallback:
                     log_monitor_message(f"    ERREUR lors de l'exécution du fallback: {e_fallback}")
 
@@ -614,7 +678,9 @@ def sweep_existing_exports(event_handler: ExportHandler, label: str):
         log_monitor_message(f"{label}: {len(existing_files)} fichier(s) *{OUTPUT_EXTENSION} présents à traiter dans '{WATCH_FOLDER_OUTPUT}'.")
     for existing in existing_files:
         log_monitor_message(f"{label} -> traitement de: '{existing.name}'")
-        event_handler.process_file(str(existing))
+        # Ne jamais bloquer le thread de surveillance : un déplacement peut prendre
+        # plusieurs minutes (stabilisation + réessais), le pool absorbe l'attente.
+        event_handler.executor.submit(event_handler.process_file, str(existing))
 
 
 def rotate_monitor_log_if_large():
@@ -693,7 +759,8 @@ def start_monitor(stop_event=None):
                     log_monitor_message(f"  Erreur lors de l'arrêt de l'ancien observer: {e_obs_stop}")
 
                 observer = Observer()
-                event_handler = ExportHandler()
+                # Réutiliser le handler et son pool : recréer un ExportHandler fuirait
+                # l'ancien ThreadPoolExecutor et perdrait les chemins en cours.
                 observer.schedule(event_handler, str(WATCH_FOLDER_OUTPUT), recursive=False)
                 observer.start()
                 log_monitor_message("Observateur Watchdog redémarré.")

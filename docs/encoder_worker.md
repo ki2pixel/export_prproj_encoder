@@ -17,7 +17,11 @@ Il joue le rôle qu'occupait AME entre le watchfolder d'entrée et le watchfolde
    `.tmp`/`.part`/fichiers cachés sont ignorés.
 3. **Adoption** (`_ensure_submission`) : un projet déposé à la main dans `WATCH_IN` est enregistré
    en base sous un nom unique contenant un `job_id`, puis encodé — équivalent du dépôt manuel d'un
-   `.proj` dans le watchfolder AME.
+   `.proj` dans le watchfolder AME. Un fichier portant déjà un `job_id` mais absent de la base
+   n'est pas adopté pendant `ENCODER_RECENT_SUBMISSION_GRACE_SECONDS` (5 s) : cela laisse à
+   `submit_to_watchfolder.py` le temps d'insérer sa ligne après le `rename()` atomique et évite
+   d'enregistrer un `OriginalFilePath` pointant vers `WATCH_IN`. La copie de soumission remet le
+   `mtime` à l'heure de publication (`copy2` préserverait sinon celui du projet source).
 4. **Reprise** : au démarrage (et à chaque tour), un job dont le statut est
    `SUBMITTED_TO_WATCHFOLDER` ou `EXPORT_ENCODING` (orphelin d'un crash) est réencodé. Un job dont la
    sortie existe déjà dans `WATCH_OUT` est simplement archivé (pas de réencodage), et un job à
@@ -60,21 +64,26 @@ Il joue le rôle qu'occupait AME entre le watchfolder d'entrée et le watchfolde
   statistiques `frame=…` et le bruit ffmpeg restent au journal.
 - Toutes les `ENCODER_PROGRESS_INTERVAL` secondes, une ligne de progression est émise (taille
   écrite et pourcentage estimé d'après le débit CBR et la durée du projet).
-- **Succès** (`rc=0` et fichier non vide) : `os.replace()` du staging vers
-  `WATCH_OUT/{stem}_{job_id}.mp4` (même système de fichiers, donc atomique), puis statut
-  `EXPORT_DONE`.
+- **Succès** (`rc=0` et fichier non vide) : le statut `EXPORT_DONE` est écrit en base **avant**
+  `os.replace()` du staging vers `WATCH_OUT/{stem}_{job_id}.mp4` (même système de fichiers, donc
+  atomique). L'événement inotify réveille ainsi le moniteur avec le bon statut et il saute la
+  stabilisation de 10 s. Si le `os.replace()` échoue, le statut repasse à `EXPORT_FAILED`.
 - **Échec** : statut `EXPORT_FAILED`, fichier partiel supprimé, journal complet conservé pour
   diagnostic (message d'erreur du script — ex. « média introuvable » — repris dans `last_error`).
 - **Dans tous les cas** : le projet est déplacé vers `WATCH_IN/Source/<horodatage>/` (équivalent de
-  l'archive source d'AME) — c'est ce qui évite toute boucle de réencodage.
+  l'archive source d'AME) — c'est ce qui évite toute boucle de réencodage. Si ce déplacement échoue,
+  l'échec n'est journalisé qu'une fois et le chemin est mémorisé (`_unarchivable_paths`) : le worker
+  ne réessaie plus à chaque cycle de 2 s et ne produit plus de boucle de logs (R-04).
 
 ## Pause, abandon, arrêt
 
 - `/api/stop` appelle `pause_and_abort()` : l'encodeur passe en pause (les projets restent dans
   `WATCH_IN`) et le job en cours est abandonné via `ProcessRegistry.abort()` — `SIGTERM` sur le
   groupe de process (le script est lancé dans sa propre session, ffmpeg en hérite), puis `SIGKILL`
-  après `ENCODER_ABORT_GRACE_SECONDS` (5 s). `clean_staging_leftovers()` purge les fichiers partiels
-  au démarrage suivant.
+  après `ENCODER_ABORT_GRACE_SECONDS` (5 s). L'arrêt sonde `os.killpg(pgid, 0)` jusqu'à la
+  disparition de **tout** le groupe : si le parent `prproj2ffmpeg.py` meurt immédiatement mais
+  qu'un `ffmpeg` enfant survit au `SIGTERM`, il reçoit bien le `SIGKILL`. `clean_staging_leftovers()`
+  purge les fichiers partiels au démarrage suivant.
 - `/api/start` appelle `resume()`.
 - À l'extinction de l'application, `atexit` appelle `shutdown()` (même abandon) : aucun process
   ffmpeg orphelin.
