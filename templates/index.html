@@ -157,8 +157,75 @@
                 </div>
             </div>
 
-            <!-- Panneau de logs -->
-            <div class="log-panel">
+            <div class="workspace-column">
+                <!-- Panneau de suivi des encodages -->
+                <section class="encoding-panel" aria-labelledby="encodingTitle">
+                    <div class="encoding-header">
+                        <h2 id="encodingTitle">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <line x1="4" y1="20" x2="20" y2="20"></line>
+                                <rect x="6" y="10" width="4" height="6" rx="1"></rect>
+                                <rect x="14" y="4" width="4" height="12" rx="1"></rect>
+                                <path d="M2 20h20"></path>
+                            </svg>
+                            Suivi des encodages
+                        </h2>
+                        <span id="encodingSummary" class="encoding-summary" aria-live="polite">Aucun encodage en cours</span>
+                    </div>
+
+                    <div id="encodingEmpty" class="encoding-empty">
+                        <p id="encodingEmptyText">Aucun encodage en cours</p>
+                        <small id="encodingEmptyHint">Les projets déposés dans le watchfolder apparaîtront ici.</small>
+                    </div>
+
+                    <div id="encodingContent" hidden>
+                        <div class="encoding-global">
+                            <div class="encoding-global-head">
+                                <span>Progression globale</span>
+                                <span id="globalProgressText">0 / 0 projet</span>
+                            </div>
+                            <progress id="globalProgressBar" class="progress-bar" max="100" value="0" aria-label="Progression globale du lot"></progress>
+                        </div>
+
+                        <div id="currentEncoding" class="encoding-current" hidden>
+                            <div class="encoding-current-head">
+                                <div class="encoding-current-title">
+                                    <h3 id="currentEncodingName">—</h3>
+                                    <span id="currentEncodingAssist" class="encoding-assist-badge" hidden>assist</span>
+                                    <p id="currentEncodingMeta" class="encoding-meta">—</p>
+                                </div>
+                                <span id="currentEncodingPercent" class="encoding-percent">—</span>
+                            </div>
+                            <progress id="currentProgressBar" class="progress-bar progress-bar--current" max="100" value="0" aria-label="Progression de l'encodage en cours"></progress>
+                            <dl class="encoding-metrics">
+                                <div>
+                                    <dt>Temps écoulé</dt>
+                                    <dd id="currentEncodingElapsed">—</dd>
+                                </div>
+                                <div>
+                                    <dt>Restant estimé</dt>
+                                    <dd id="currentEncodingEta">—</dd>
+                                </div>
+                                <div>
+                                    <dt>Vitesse</dt>
+                                    <dd id="currentEncodingSpeed">—</dd>
+                                </div>
+                                <div>
+                                    <dt>Taille écrite</dt>
+                                    <dd id="currentEncodingSize">—</dd>
+                                </div>
+                            </dl>
+                        </div>
+
+                        <div id="encodingQueueBlock" class="encoding-queue" hidden>
+                            <h3>File d'attente <span id="encodingQueueCount" class="encoding-queue-count"></span></h3>
+                            <ol id="encodingQueueList" class="encoding-queue-list"></ol>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Panneau de logs -->
+                <div class="log-panel">
                 <div class="log-header">
                     <h2>
                         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -189,6 +256,7 @@
                     </svg>
                     Nouveau log reçu
                 </button>
+                </div>
             </div>
         </main>
     </div>

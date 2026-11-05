@@ -22,7 +22,27 @@ const DOM = {
     speechToggle: document.getElementById('speechToggle'),
     confirmDialog: document.getElementById('confirmDialog'),
     confirmDialogMessage: document.getElementById('confirmDialogMessage'),
-    confirmDialogConfirm: document.getElementById('confirmDialogConfirm')
+    confirmDialogConfirm: document.getElementById('confirmDialogConfirm'),
+    encodingSummary: document.getElementById('encodingSummary'),
+    encodingEmpty: document.getElementById('encodingEmpty'),
+    encodingEmptyText: document.getElementById('encodingEmptyText'),
+    encodingEmptyHint: document.getElementById('encodingEmptyHint'),
+    encodingContent: document.getElementById('encodingContent'),
+    globalProgressBar: document.getElementById('globalProgressBar'),
+    globalProgressText: document.getElementById('globalProgressText'),
+    currentEncoding: document.getElementById('currentEncoding'),
+    currentEncodingName: document.getElementById('currentEncodingName'),
+    currentEncodingAssist: document.getElementById('currentEncodingAssist'),
+    currentEncodingMeta: document.getElementById('currentEncodingMeta'),
+    currentEncodingPercent: document.getElementById('currentEncodingPercent'),
+    currentProgressBar: document.getElementById('currentProgressBar'),
+    currentEncodingElapsed: document.getElementById('currentEncodingElapsed'),
+    currentEncodingEta: document.getElementById('currentEncodingEta'),
+    currentEncodingSpeed: document.getElementById('currentEncodingSpeed'),
+    currentEncodingSize: document.getElementById('currentEncodingSize'),
+    encodingQueueBlock: document.getElementById('encodingQueueBlock'),
+    encodingQueueCount: document.getElementById('encodingQueueCount'),
+    encodingQueueList: document.getElementById('encodingQueueList')
 };
 
 // Variables d'état globales
@@ -37,6 +57,7 @@ let isActionPending = false; // Verrou pour éviter le double-clic
 let isAuthenticated = true; // Passe à false après un 401 : stoppe le polling et le SSE (F6/F7)
 let isCheckingStatus = false;
 let statusRefreshQueued = false;
+let lastQueueKey = ''; // Évite de reconstruire la file d'attente à chaque sondage
 
 // Jeton CSRF injecté par le serveur via la balise <meta> (F3 : plus de script inline)
 const csrfMeta = document.querySelector('meta[name="csrf-token"]');
@@ -55,6 +76,15 @@ const STATUS_TEXT_CLASSES = [
     'status-text--danger',
     'status-text--muted'
 ];
+const ENCODING_SUMMARY_CLASSES = [
+    'encoding-summary--ok',
+    'encoding-summary--warning',
+    'encoding-summary--danger',
+    'encoding-summary--muted'
+];
+const NUMBER_FORMAT = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 });
+const SPEED_FORMAT = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 });
+const BYTE_FORMAT = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 });
 
 // Formate la date/heure locale de façon stable et française (recommandation audit R11)
 function nowFr() {
@@ -361,6 +391,7 @@ function setOfflineStatus(offline) {
             DOM.stopBtn.classList.remove('btn-loading');
         }
         setOptionsDisabled(true);
+        renderEncodingUnavailable();
     } else if (wasOffline) {
         // Retour en ligne : conserver les logs accumulés et relancer le SSE si nécessaire.
         addLogLine(`[${nowFr()}] 🔄 Connexion rétablie.`);
@@ -437,6 +468,282 @@ function updateActionButtonsState(isSubmitting, isEncoderBusy = false) {
     }
 }
 
+// --- Suivi visuel des encodages ---
+
+function setEncodingSummary(text, tone) {
+    if (!DOM.encodingSummary) return;
+    DOM.encodingSummary.textContent = text;
+    DOM.encodingSummary.classList.remove(...ENCODING_SUMMARY_CLASSES);
+    if (tone) DOM.encodingSummary.classList.add(`encoding-summary--${tone}`);
+}
+
+function clampPercent(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    return Math.min(100, Math.max(0, value));
+}
+
+function formatPercent(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${NUMBER_FORMAT.format(value)} %`;
+}
+
+function formatDuration(seconds) {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '—';
+    const total = Math.round(seconds);
+    if (total < 60) return `${total} s`;
+    const minutes = Math.floor(total / 60);
+    const remainingSeconds = total % 60;
+    if (minutes < 60) {
+        return remainingSeconds ? `${minutes} min ${remainingSeconds} s` : `${minutes} min`;
+    }
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes ? `${hours} h ${remainingMinutes} min` : `${hours} h`;
+}
+
+function formatBytes(bytes) {
+    if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return '—';
+    if (bytes >= 1_000_000_000) return `${BYTE_FORMAT.format(bytes / 1_000_000_000)} Go`;
+    if (bytes >= 1_000_000) return `${BYTE_FORMAT.format(bytes / 1_000_000)} Mo`;
+    if (bytes >= 1_000) return `${BYTE_FORMAT.format(bytes / 1_000)} ko`;
+    return `${Math.round(bytes)} o`;
+}
+
+function formatSpeed(speed) {
+    if (typeof speed !== 'number' || !Number.isFinite(speed) || speed <= 0) return '—';
+    return `×${SPEED_FORMAT.format(speed)}`;
+}
+
+function setProgressValue(element, percent, indeterminateLabel) {
+    if (!element) return;
+    const value = clampPercent(percent);
+    if (value === null) {
+        element.removeAttribute('value');
+        element.classList.add('progress-bar--indeterminate');
+        element.setAttribute('aria-valuetext', indeterminateLabel || 'Estimation indisponible');
+    } else {
+        element.value = value;
+        element.classList.remove('progress-bar--indeterminate');
+        element.setAttribute('aria-valuetext', formatPercent(value));
+    }
+}
+
+function buildProjectMeta(project) {
+    if (!project || typeof project !== 'object') return '';
+    const parts = [];
+    if (project.sequence_name) parts.push(String(project.sequence_name));
+    if (typeof project.duration_sec === 'number' && project.duration_sec > 0) {
+        parts.push(formatDuration(project.duration_sec));
+    }
+    if (typeof project.fps === 'number' && project.fps > 0) {
+        parts.push(`${NUMBER_FORMAT.format(project.fps)} fps`);
+    }
+    if (Number.isInteger(project.width) && Number.isInteger(project.height)
+        && project.width > 0 && project.height > 0) {
+        parts.push(`${project.width} × ${project.height}`);
+    }
+    return parts.join(' · ');
+}
+
+function createAssistBadge() {
+    const badge = document.createElement('span');
+    badge.className = 'encoding-assist-badge';
+    badge.textContent = 'assist';
+    return badge;
+}
+
+function renderEncodingQueue(queue) {
+    const list = DOM.encodingQueueList;
+    if (!list) return;
+
+    const key = queue.map((item) => `${item.job_id || ''}|${item.file_name || ''}`).join('||');
+    if (key === lastQueueKey) return;
+    lastQueueKey = key;
+
+    list.textContent = '';
+    const fragment = document.createDocumentFragment();
+    queue.forEach((item, index) => {
+        const entry = document.createElement('li');
+        entry.className = 'encoding-queue-item';
+
+        const position = document.createElement('span');
+        position.className = 'encoding-queue-position';
+        position.textContent = `${index + 1}.`;
+
+        const info = document.createElement('div');
+        info.className = 'encoding-queue-info';
+
+        const nameRow = document.createElement('div');
+        nameRow.className = 'encoding-queue-name-row';
+        const name = document.createElement('span');
+        name.className = 'encoding-queue-name';
+        name.textContent = item.display_name || item.file_name || 'Projet inconnu';
+        nameRow.appendChild(name);
+        if (item.is_assist) nameRow.appendChild(createAssistBadge());
+
+        const file = document.createElement('span');
+        file.className = 'encoding-queue-file';
+        file.textContent = item.file_name || '';
+        if (!item.file_name) file.hidden = true;
+
+        info.appendChild(nameRow);
+        info.appendChild(file);
+        entry.appendChild(position);
+        entry.appendChild(info);
+        fragment.appendChild(entry);
+    });
+    list.appendChild(fragment);
+}
+
+function renderEncodingUnavailable() {
+    setEncodingSummary('État indisponible', 'muted');
+    if (DOM.encodingEmpty) DOM.encodingEmpty.hidden = false;
+    if (DOM.encodingEmptyText) DOM.encodingEmptyText.textContent = 'État indisponible';
+    if (DOM.encodingEmptyHint) DOM.encodingEmptyHint.textContent = 'Le suivi reprendra automatiquement à la reconnexion.';
+    if (DOM.encodingContent) DOM.encodingContent.hidden = true;
+    lastQueueKey = '';
+}
+
+function renderEncodingPanel(encoder) {
+    if (!DOM.encodingContent || !DOM.encodingEmpty) return;
+    if (!encoder || typeof encoder !== 'object') {
+        renderEncodingUnavailable();
+        return;
+    }
+
+    const queue = Array.isArray(encoder.queue) ? encoder.queue : [];
+    const hasCurrent = Boolean(encoder.current_file || encoder.current_job);
+    const hasWork = hasCurrent || queue.length > 0;
+
+    if (!hasWork) {
+        setEncodingSummary(
+            encoder.running ? 'Aucun encodage en cours' : 'Encodeur arrêté',
+            encoder.running ? 'muted' : 'danger'
+        );
+        DOM.encodingEmpty.hidden = false;
+        DOM.encodingEmptyText.textContent = encoder.running
+            ? 'Aucun encodage en cours'
+            : 'Encodeur arrêté';
+        DOM.encodingEmptyHint.textContent = encoder.running
+            ? 'Les projets déposés dans le watchfolder apparaîtront ici.'
+            : 'L’encodeur n’est pas démarré.';
+        DOM.encodingContent.hidden = true;
+        lastQueueKey = '';
+        return;
+    }
+
+    DOM.encodingEmpty.hidden = true;
+    DOM.encodingContent.hidden = false;
+
+    let summary = '';
+    let tone = 'ok';
+    if (!encoder.encoder_available) {
+        summary = 'Encodeur indisponible';
+        tone = 'danger';
+    } else if (!encoder.running) {
+        summary = `Encodeur arrêté${queue.length ? ` · ${queue.length} en attente` : ''}`;
+        tone = 'danger';
+    } else if (encoder.paused) {
+        summary = `En pause${queue.length ? ` · ${queue.length} en attente` : ''}`;
+        tone = 'warning';
+    } else if (hasCurrent) {
+        summary = `Encodage en cours${queue.length ? ` · ${queue.length} en attente` : ''}`;
+    } else {
+        summary = `${queue.length} en attente`;
+        tone = 'warning';
+    }
+    setEncodingSummary(summary, tone);
+
+    const progress = encoder.current_progress && typeof encoder.current_progress === 'object'
+        ? encoder.current_progress
+        : {};
+    const currentPercent = clampPercent(progress.percent);
+
+    // Barre globale : jobs terminés + fraction du job courant, sur le total du lot.
+    const batch = encoder.batch && typeof encoder.batch === 'object' ? encoder.batch : {};
+    let total = Number(batch.total);
+    if (!Number.isFinite(total) || total <= 0) {
+        total = queue.length + (hasCurrent ? 1 : 0);
+    }
+    let completed = Number(batch.completed);
+    if (!Number.isFinite(completed) || completed < 0) completed = 0;
+    completed = Math.min(completed, total);
+    const currentFraction = currentPercent === null ? 0 : currentPercent / 100;
+    const globalPercent = total > 0
+        ? clampPercent(((completed + currentFraction) / total) * 100)
+        : null;
+
+    setProgressValue(
+        DOM.globalProgressBar,
+        globalPercent,
+        'Progression globale indisponible'
+    );
+    if (DOM.globalProgressText) {
+        DOM.globalProgressText.textContent = total > 0
+            ? `${completed} / ${total} projet${total > 1 ? 's' : ''} · ${formatPercent(globalPercent)}`
+            : '—';
+    }
+
+    if (DOM.currentEncoding) DOM.currentEncoding.hidden = !hasCurrent;
+    if (hasCurrent) {
+        const displayName = encoder.current_display_name
+            || encoder.current_file
+            || encoder.current_job
+            || 'Projet inconnu';
+        if (DOM.currentEncodingName) DOM.currentEncodingName.textContent = displayName;
+        if (DOM.currentEncodingAssist) DOM.currentEncodingAssist.hidden = !encoder.current_is_assist;
+
+        const meta = buildProjectMeta(encoder.current_project);
+        if (DOM.currentEncodingMeta) {
+            DOM.currentEncodingMeta.textContent = meta
+                || (encoder.current_stage === 'preparing' ? 'Préparation des médias…' : 'Métadonnées indisponibles');
+        }
+
+        const isPreparing = encoder.current_stage === 'preparing';
+        setProgressValue(
+            DOM.currentProgressBar,
+            isPreparing ? null : currentPercent,
+            isPreparing ? 'Préparation des médias…' : 'Estimation indisponible'
+        );
+        if (DOM.currentEncodingPercent) {
+            DOM.currentEncodingPercent.textContent = isPreparing
+                ? 'Préparation…'
+                : (currentPercent === null ? 'Estimation indisponible' : formatPercent(currentPercent));
+        }
+
+        if (DOM.currentEncodingElapsed) {
+            DOM.currentEncodingElapsed.textContent = formatDuration(progress.elapsed_seconds);
+        }
+        if (DOM.currentEncodingEta) {
+            DOM.currentEncodingEta.textContent = formatDuration(progress.eta_seconds);
+        }
+        if (DOM.currentEncodingSpeed) {
+            DOM.currentEncodingSpeed.textContent = formatSpeed(progress.speed);
+        }
+        if (DOM.currentEncodingSize) {
+            const written = Number(progress.written_bytes);
+            const expected = Number(progress.expected_bytes);
+            if (Number.isFinite(written) && written > 0) {
+                DOM.currentEncodingSize.textContent = Number.isFinite(expected) && expected > 0
+                    ? `${formatBytes(written)} / ${formatBytes(expected)}`
+                    : formatBytes(written);
+            } else if (Number.isFinite(expected) && expected > 0) {
+                DOM.currentEncodingSize.textContent = `0 o / ${formatBytes(expected)}`;
+            } else {
+                DOM.currentEncodingSize.textContent = '—';
+            }
+        }
+    }
+
+    if (DOM.encodingQueueBlock) DOM.encodingQueueBlock.hidden = queue.length === 0;
+    if (DOM.encodingQueueCount) {
+        DOM.encodingQueueCount.textContent = queue.length
+            ? `${queue.length} en attente`
+            : '';
+    }
+    renderEncodingQueue(queue);
+}
+
 // Planifie un unique prochain cycle de polling, en annulant tout timer existant (RES-F03).
 function scheduleNextStatusPoll() {
     if (statusTimeoutId) {
@@ -506,13 +813,15 @@ async function checkStatus() {
                 'warning'
             );
         } else {
-            const pending = encoder.queue_pending ? `${encoder.queue_pending} en file` : 'file vide';
+            const pending = encoder.queue_pending ? `${encoder.queue_pending} en attente` : 'file vide';
             const encoderLabel = encoder.current_file
                 ? `Encodage en cours · ${pending}`
                 : (encoder.queue_pending ? `Prêt · ${pending}` : 'Prêt');
             setStatusIndicator(DOM.encoderStatusIndicator, encoder.current_file ? 'running' : '');
             setStatusText(DOM.encoderStatusText, encoderLabel, 'ok');
         }
+
+        renderEncodingPanel(encoder);
     } catch (error) {
         console.error('Erreur lors de la vérification du statut:', error);
         failedRequests++;

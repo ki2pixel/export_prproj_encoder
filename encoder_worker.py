@@ -48,7 +48,7 @@ from config import (
     resolve_project_root,
 )
 from db_helper import get_submission_by_job_id, init_db, update_submission_status_by_job_id
-from filename_utils import extract_job_id
+from filename_utils import extract_job_id, is_assist_stem, strip_assist_suffix, strip_job_id
 from prproj_engine import (
     EncodeSettings,
     ProcessRegistry,
@@ -82,8 +82,14 @@ _state = {
     'paused': False,
     'current_job': None,
     'current_file': None,
+    'current_display_name': None,
+    'current_is_assist': False,
     'current_started_at': None,
+    'current_stage': None,
+    'current_project': None,
+    'current_progress': None,
     'queue_pending': 0,
+    'batch': {'completed': 0, 'total': 0, 'active': False},
     'last_error': None,
     'processed': 0,
     'failed': 0,
@@ -143,7 +149,97 @@ def _bump(counter: str, delta: int = 1):
 def snapshot() -> dict:
     """Photographie de l'état de l'encodeur pour l'API."""
     with _state_lock:
-        return dict(_state)
+        state = dict(_state)
+        state['batch'] = dict(_state.get('batch') or {})
+        return state
+
+
+def _clear_current_job_state() -> None:
+    """Efface l'état du job courant (fin normale, abandon ou exception inattendue)."""
+    _set_state(
+        current_job=None,
+        current_file=None,
+        current_display_name=None,
+        current_is_assist=False,
+        current_started_at=None,
+        current_stage=None,
+        current_project=None,
+        current_progress=None,
+    )
+
+
+def _display_name_for(path: Path) -> tuple[str, bool]:
+    """Nom lisible d'un projet (sans job_id ni suffixe `_assist`) et indicateur de variante."""
+    stem = strip_job_id(path.stem)
+    is_assist = is_assist_stem(stem)
+    display = strip_assist_suffix(stem) if is_assist else stem
+    return display or path.stem, is_assist
+
+
+def queue_snapshot() -> list[dict]:
+    """
+    Liste en lecture seule des projets en attente dans WATCH_IN, hors job courant.
+
+    Contrairement à `_pick_next_job`, cette fonction n'adopte ni ne renomme aucun fichier :
+    elle peut donc être appelée à chaque sondage de `/api/status`.
+    """
+    with _state_lock:
+        current_file = _state.get('current_file')
+
+    queue = []
+    for path in _list_pending_files():
+        if current_file and path.name == current_file:
+            continue
+        display_name, is_assist = _display_name_for(path)
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        queue.append({
+            'job_id': extract_job_id(path.name),
+            'file_name': path.name,
+            'display_name': display_name,
+            'is_assist': is_assist,
+            'size_bytes': size_bytes,
+        })
+    return queue
+
+
+def _update_batch_state(pending_count: int) -> None:
+    """
+    Met à jour l'avancement du lot courant.
+
+    `pending_count` inclut le job en cours quand il y en a un. Un nouveau lot démarre dès que
+    la file était vide ou que le lot précédent est terminé. Si de nouveaux projets arrivent
+    pendant un lot, le total augmente sans remettre à zéro les jobs déjà terminés.
+    """
+    with _state_lock:
+        batch = dict(_state.get('batch') or {})
+        current = bool(_state.get('current_job'))
+        if pending_count <= 0 and not current:
+            batch['active'] = False
+            _state['batch'] = batch
+            return
+
+        if not batch.get('active') or batch.get('completed', 0) >= batch.get('total', 0):
+            batch = {'completed': 0, 'total': max(1, pending_count), 'active': True}
+        else:
+            in_progress = 1 if current else 0
+            waiting = max(0, pending_count - in_progress)
+            batch['total'] = max(
+                batch.get('total', 0),
+                batch.get('completed', 0) + in_progress + waiting,
+            )
+        _state['batch'] = batch
+
+
+def _bump_batch_completed() -> None:
+    """Comptabilise un job terminé (succès, échec ou abandon) dans le lot courant."""
+    with _state_lock:
+        batch = dict(_state.get('batch') or {})
+        batch['completed'] = batch.get('completed', 0) + 1
+        batch['total'] = max(batch.get('total', 0), batch['completed'])
+        _state['batch'] = batch
 
 
 def pause_and_abort():
@@ -305,10 +401,30 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
             log_encoder_message(f"  ERREUR: impossible de créer '{directory}': {e}")
 
     started_at = time.monotonic()
-    _set_state(current_job=job_id, current_file=prproj_path.name, current_started_at=started_at)
+    display_name, is_assist = _display_name_for(prproj_path)
+    _set_state(
+        current_job=job_id,
+        current_file=prproj_path.name,
+        current_display_name=display_name,
+        current_is_assist=is_assist,
+        current_started_at=started_at,
+        current_stage='preparing',
+        current_project=None,
+        current_progress=None,
+    )
 
     media_bases = _media_bases_for(row)
     project_info = read_project_info(prproj_path, script_path, media_bases=media_bases)
+    project_payload = None
+    if project_info:
+        project_payload = {
+            'sequence_name': project_info.sequence_name,
+            'duration_sec': project_info.duration_sec,
+            'fps': project_info.fps,
+            'width': project_info.width,
+            'height': project_info.height,
+        }
+    _set_state(current_project=project_payload)
 
     log_encoder_message("=" * 70)
     log_encoder_message(f"Encodage du job {job_id} : '{prproj_path.name}'")
@@ -325,8 +441,9 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
     update_submission_status_by_job_id(JOBS_DB_FILE, job_id, STATUS_ENCODING)
 
     expected_bytes = expected_output_bytes(project_info, settings)
+    duration_sec = project_info.duration_sec if project_info else None
 
-    def _on_progress(idle_seconds: float):
+    def _on_progress(idle_seconds: float, stats: dict | None = None, *, emit_log: bool = True):
         size = 0
         try:
             if staging_path.exists():
@@ -334,10 +451,45 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
         except OSError:
             size = 0
         elapsed = time.monotonic() - started_at
-        detail = f"{size / 1_000_000:.1f} Mo écrits"
-        if expected_bytes and size:
-            detail += f" (≈{min(99, int(size * 100 / expected_bytes))} % estimé)"
-        log_encoder_message(f"  encodage en cours : {detail} — {elapsed:.0f} s écoulées")
+
+        stats = stats or {}
+        encoded_sec = stats.get('encoded_sec')
+        speed = stats.get('speed')
+
+        # Priorité au temps encodé remonté par ffmpeg : plus fiable que la taille du MP4.
+        percent = None
+        if duration_sec and encoded_sec is not None:
+            percent = min(99.0, max(0.0, encoded_sec * 100.0 / duration_sec))
+        elif expected_bytes:
+            percent = min(99.0, size * 100.0 / expected_bytes) if size else 0.0
+
+        eta_seconds = None
+        if speed and duration_sec is not None and encoded_sec is not None:
+            eta_seconds = max(0.0, (duration_sec - encoded_sec) / speed)
+        elif percent and elapsed > 0:
+            eta_seconds = max(0.0, elapsed * (100.0 - percent) / percent)
+
+        stage = 'encoding' if (size > 0 or (encoded_sec or 0) > 0) else 'preparing'
+        _set_state(current_stage=stage, current_progress={
+            'percent': round(percent, 1) if percent is not None else None,
+            'elapsed_seconds': round(elapsed, 1),
+            'eta_seconds': round(eta_seconds, 1) if eta_seconds is not None else None,
+            'speed': speed,
+            'written_bytes': size,
+            'expected_bytes': expected_bytes,
+            'encoded_sec': round(encoded_sec, 2) if encoded_sec is not None else None,
+            'duration_sec': duration_sec,
+        })
+
+        if emit_log:
+            detail = f"{size / 1_000_000:.1f} Mo écrits"
+            if percent is not None:
+                detail += f" (≈{int(percent)} % estimé)"
+            if speed:
+                detail += f" · ×{speed:.2f}"
+            log_encoder_message(f"  encodage en cours : {detail} — {elapsed:.0f} s écoulées")
+
+    _on_progress(0.0, {}, emit_log=False)
 
     # Les sorties brutes (script + ffmpeg) sont journalisées ici, les résumés français alimentent l'UI (SSE)
     def _on_line(raw_line: str):
@@ -358,7 +510,7 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
         progress_interval=ENCODER_PROGRESS_INTERVAL,
     )
 
-    _set_state(current_job=None, current_file=None, current_started_at=None)
+    _clear_current_job_state()
 
     # Nettoyage d'un éventuel fichier partiel
     def _discard_staging():
@@ -547,6 +699,7 @@ def start_encoder(stop_event=None, once: bool = False):
 
         pending = _list_pending_files()
         _set_state(queue_pending=len(pending))
+        _update_batch_state(len(pending))
 
         if _state_snapshot_paused():
             time.sleep(ENCODER_POLL_INTERVAL)
@@ -558,8 +711,11 @@ def start_encoder(stop_event=None, once: bool = False):
                 try:
                     _process_job(prproj_path, job_id, row, settings, script_path)
                 except Exception as e:
+                    _clear_current_job_state()
                     log_encoder_message(f"ERREUR INATTENDUE pendant l'encodage de '{prproj_path.name}': {type(e).__name__} - {e}")
                     _archive_source(prproj_path)
+                finally:
+                    _bump_batch_completed()
                 continue  # enchaîne immédiatement sur le job suivant
 
         if once and not _list_pending_files():

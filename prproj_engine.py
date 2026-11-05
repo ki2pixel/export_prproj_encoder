@@ -46,6 +46,9 @@ _RECORD_SEP_RE = re.compile(rb'[\r\n]')
 # Ligne de statistiques ffmpeg (frame=…, size=…, time=…) : journalisée, jamais envoyée à l'UI
 _FFMPEG_STATS_RE = re.compile(
     r'^(frame|fps|size|time|bitrate|speed|out_time|progress|dup_frames|drop_frames|total_size)=')
+# Champs utiles des statistiques ffmpeg pour la barre de progression de l'UI.
+_FFMPEG_TIME_RE = re.compile(r'\btime=(-?)(\d+):(\d{2}):(\d{2}(?:\.\d+)?)')
+_FFMPEG_SPEED_RE = re.compile(r'\bspeed=\s*([0-9]+(?:\.[0-9]+)?)x')
 
 
 @dataclass(frozen=True)
@@ -355,7 +358,8 @@ def run_export(prproj_path: Path, output_path: Path, log_path: Path, settings: E
     Exécute un export prproj2ffmpeg pour un `.prproj`.
 
     - `on_line`     : appelé pour chaque ligne brute du script/ffmpeg (texte décodé) ;
-    - `on_progress`: appelé toutes les `progress_interval` secondes (estimation) ;
+    - `on_progress`: appelé toutes les `progress_interval` secondes avec l'inactivité observée
+                      et les dernières statistiques ffmpeg (`encoded_sec`, `speed`) ;
     - `registry`    : permet d'abandonner le job depuis un autre thread.
 
     Toutes les lignes brutes sont écrites dans `log_path` (journal complet du job).
@@ -460,6 +464,7 @@ def _stream_output(process, on_line, on_progress, progress_interval: float, regi
     last_activity = time.monotonic()
     last_progress = time.monotonic()
     interval = progress_interval if progress_interval and progress_interval > 0 else None
+    ffmpeg_stats: dict = {}
     try:
         selector.register(fd, selectors.EVENT_READ)
         while True:
@@ -476,16 +481,16 @@ def _stream_output(process, on_line, on_progress, progress_interval: float, regi
                 parts = _RECORD_SEP_RE.split(buffered)
                 buffered = parts.pop()  # dernier fragment potentiellement incomplet
                 for raw_line in parts:
-                    _emit_line(raw_line, collected, on_line, on_persist)
+                    _update_ffmpeg_stats(raw_line, ffmpeg_stats, collected, on_line, on_persist)
                 # Protection mémoire : ligne anormalement longue, on la remonte telle quelle
                 if len(buffered) > _MAX_LINE_BYTES:
-                    _emit_line(buffered, collected, on_line, on_persist)
+                    _update_ffmpeg_stats(buffered, ffmpeg_stats, collected, on_line, on_persist)
                     buffered = b""
             if on_progress is not None and interval is not None:
                 now = time.monotonic()
                 if now - last_progress >= interval:
                     last_progress = now
-                    on_progress(now - last_activity)
+                    on_progress(now - last_activity, dict(ffmpeg_stats))
             if registry.abort_requested and process.poll() is not None:
                 break
         if buffered:
@@ -502,10 +507,47 @@ def _stream_output(process, on_line, on_progress, progress_interval: float, regi
     return collected
 
 
-def _emit_line(raw_line: bytes, collected: list, on_line, on_persist=None) -> None:
+def _update_ffmpeg_stats(raw_line: bytes, stats: dict, collected: list, on_line, on_persist=None) -> None:
+    """Émet une ligne puis mémorise les champs de progression ffmpeg qu'elle contient."""
+    text = _emit_line(raw_line, collected, on_line, on_persist)
+    parsed = parse_ffmpeg_stats_line(text) if text else None
+    if parsed:
+        stats.update(parsed)
+
+
+def parse_ffmpeg_stats_line(raw_line: str) -> dict | None:
+    """
+    Extrait `encoded_sec` et `speed` d'une ligne de statistiques ffmpeg.
+
+    Retourne None si la ligne n'est pas une statistique ou ne contient aucun champ exploitable.
+    Les valeurs `time=N/A` et `speed=N/A` sont simplement ignorées.
+    """
+    text = str(raw_line or '').strip()
+    if not text or not _FFMPEG_STATS_RE.match(text):
+        return None
+
+    parsed: dict = {}
+    time_match = _FFMPEG_TIME_RE.search(text)
+    if time_match:
+        negative, hours, minutes, seconds = time_match.groups()
+        value = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        if not negative:
+            parsed['encoded_sec'] = value
+
+    speed_match = _FFMPEG_SPEED_RE.search(text)
+    if speed_match:
+        speed = float(speed_match.group(1))
+        if speed > 0:
+            parsed['speed'] = speed
+
+    return parsed or None
+
+
+def _emit_line(raw_line: bytes, collected: list, on_line, on_persist=None) -> str | None:
+    """Décode et émet une ligne ; retourne son texte nettoyé (None si vide)."""
     text = raw_line.decode('utf-8', errors='replace').strip()
     if not text:
-        return
+        return None
     collected.append(text)
     if on_persist is not None:
         try:
@@ -517,6 +559,7 @@ def _emit_line(raw_line: bytes, collected: list, on_line, on_persist=None) -> No
             on_line(text)
         except Exception:
             pass
+    return text
 
 
 def _truncate(text: str, limit: int = _UI_LINE_MAX_CHARS) -> str:

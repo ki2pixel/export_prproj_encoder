@@ -55,6 +55,7 @@ from prproj_engine import (
     EncodeSettings,
     build_command,
     parse_bitrate,
+    parse_ffmpeg_stats_line,
     probe_ffmpeg,
     read_project_info,
     summarize_line,
@@ -374,6 +375,77 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.assertEqual(parse_bitrate("8000k"), 8_000_000)
         self.assertEqual(parse_bitrate("1200000"), 1_200_000)
         self.assertEqual(parse_bitrate("n'importe quoi"), 0)
+
+    def test_parse_ffmpeg_stats_line(self):
+        """Les statistiques ffmpeg alimentent la progression sans être remontées dans l'UI."""
+        self.assertEqual(
+            parse_ffmpeg_stats_line(
+                "frame=  120 fps= 25 q=23.0 size=    1024kB time=00:00:04.80 "
+                "bitrate=1747.6kbits/s speed=1.02x"),
+            {'encoded_sec': 4.8, 'speed': 1.02},
+        )
+        self.assertEqual(
+            parse_ffmpeg_stats_line("frame=1 time=01:02:03.50 speed=2.5x"),
+            {'encoded_sec': 3723.5, 'speed': 2.5},
+        )
+        self.assertIsNone(parse_ffmpeg_stats_line("frame=1 time=N/A speed=N/A"))
+        self.assertIsNone(parse_ffmpeg_stats_line("ffmpeg version 6.1.1"))
+        self.assertIsNone(parse_ffmpeg_stats_line(""))
+
+    def test_queue_snapshot_exclut_le_job_courant(self):
+        """La file exposée à l'UI est en lecture seule et ne contient pas le job en cours."""
+        import encoder_worker
+
+        watch_in = self.base_folder / "WATCH_IN"
+        watch_in.mkdir(parents=True, exist_ok=True)
+        current = watch_in / "En cours_20261105_120000_abcdef.prproj"
+        waiting = watch_in / "En attente_20261105_120100_bbbbbb.prproj"
+        assist = watch_in / "Assist_9x16_assist_20261105_120200_cccccc.prproj"
+        for path, mtime in ((current, 100), (waiting, 200), (assist, 300)):
+            path.write_text("x", encoding="utf-8")
+            os.utime(path, (mtime, mtime))
+
+        state = dict(encoder_worker._state)
+        state['current_file'] = current.name
+        with patch.object(encoder_worker, "WATCH_FOLDER_INPUT", watch_in), \
+             patch.object(encoder_worker, "_state", state):
+            queue = encoder_worker.queue_snapshot()
+
+        self.assertEqual([item['file_name'] for item in queue], [waiting.name, assist.name])
+        self.assertEqual(queue[0]['display_name'], "En attente")
+        self.assertEqual(queue[0]['job_id'], "20261105_120100_bbbbbb")
+        self.assertFalse(queue[0]['is_assist'])
+        self.assertEqual(queue[1]['display_name'], "Assist_9x16")
+        self.assertTrue(queue[1]['is_assist'])
+
+    def test_batch_progress(self):
+        """Le lot compte les jobs terminés et s'élargit quand de nouvelles soumissions arrivent."""
+        import encoder_worker
+
+        state = {
+            'current_job': None,
+            'batch': {'completed': 0, 'total': 0, 'active': False},
+        }
+        with patch.object(encoder_worker, "_state", state):
+            encoder_worker._update_batch_state(3)
+            self.assertEqual(state['batch'], {'completed': 0, 'total': 3, 'active': True})
+
+            encoder_worker._bump_batch_completed()
+            encoder_worker._update_batch_state(2)
+            self.assertEqual(state['batch'], {'completed': 1, 'total': 3, 'active': True})
+
+            # Une nouvelle soumission pendant le lot agrandit le total sans remettre à zéro.
+            encoder_worker._update_batch_state(3)
+            self.assertEqual(state['batch'], {'completed': 1, 'total': 4, 'active': True})
+
+            for remaining in (2, 1, 0):
+                encoder_worker._bump_batch_completed()
+                encoder_worker._update_batch_state(remaining)
+            self.assertEqual(state['batch'], {'completed': 4, 'total': 4, 'active': False})
+
+            # Un nouveau lot repart de zéro.
+            encoder_worker._update_batch_state(2)
+            self.assertEqual(state['batch'], {'completed': 0, 'total': 2, 'active': True})
 
     def test_summarize_line(self):
         # Statistiques ffmpeg : journalisées, jamais remontées à l'UI
@@ -2114,12 +2186,28 @@ class TestFlaskSmoke(unittest.TestCase):
         self.assertIn('running', payload)
         self.assertIn('monitor_running', payload)
         self.assertIn('encoder', payload)
-        for key in ('running', 'paused', 'queue_pending', 'current_job', 'encoder_available', 'encoder_engine'):
+        for key in (
+            'running', 'paused', 'queue_pending', 'queue', 'current_job',
+            'current_progress', 'current_project', 'batch',
+            'encoder_available', 'encoder_engine',
+        ):
             self.assertIn(key, payload['encoder'])
+        self.assertIsInstance(payload['encoder']['queue'], list)
+        self.assertIn('completed', payload['encoder']['batch'])
+        self.assertIn('total', payload['encoder']['batch'])
+        self.assertIn('active', payload['encoder']['batch'])
 
         # L'interface déclare son icône (favicon servi par /static, autorisé par la CSP img-src 'self')
         page = self.client.get('/')
-        self.assertIn('static/icon.svg', page.get_data(as_text=True))
+        html = page.get_data(as_text=True)
+        self.assertIn('static/icon.svg', html)
+        # Le panneau lui-même est identifié par sa classe/aria ; les éléments de suivi ont un id.
+        self.assertIn('class="encoding-panel"', html)
+        for element_id in (
+            'encodingSummary', 'globalProgressBar',
+            'currentProgressBar', 'encodingQueueList',
+        ):
+            self.assertIn(f'id="{element_id}"', html)
 
         # Nettoyage de la session du client de test
         self.client.get('/logout')

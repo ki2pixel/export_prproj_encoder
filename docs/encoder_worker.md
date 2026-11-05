@@ -63,7 +63,10 @@ Il joue le rôle qu'occupait AME entre le watchfolder d'entrée et le watchfolde
   de cache, fin d'export) sont traduites en résumé français dans l'UI (`summarize_line`) — les
   statistiques `frame=…` et le bruit ffmpeg restent au journal.
 - Toutes les `ENCODER_PROGRESS_INTERVAL` secondes, une ligne de progression est émise (taille
-  écrite et pourcentage estimé d'après le débit CBR et la durée du projet).
+  écrite et pourcentage estimé). La progression s'appuie en priorité sur les statistiques `time=`
+  remontées en temps réel par ffmpeg via `prproj_engine` (durée encodée / durée du projet), avec
+  vitesse (`speed=`) et estimation de temps restant (ETA) ; repli sur le ratio octets écrits / octets
+  attendus si `time=` est absent.
 - **Succès** (`rc=0` et fichier non vide) : le statut `EXPORT_DONE` est écrit en base **avant**
   `os.replace()` du staging vers `WATCH_OUT/{stem}_{job_id}.mp4` (même système de fichiers, donc
   atomique). L'événement inotify réveille ainsi le moniteur avec le bon statut et il saute la
@@ -90,9 +93,16 @@ Il joue le rôle qu'occupait AME entre le watchfolder d'entrée et le watchfolde
 
 ## État exposé (`snapshot()`)
 
-`paused`, `current_job`, `current_file`, `current_started_at`, `queue_pending`, `processed`,
-`failed`, `aborted`, `last_error`, `encoder_available`, `encoder_engine` — consommé par
-`/api/status` (ligne « Encodeur » de l'UI ; `encoder_engine` détaille ffmpeg/version/NVENC au survol).
+`paused`, `current_job`, `current_file`, `current_display_name`, `current_is_assist`,
+`current_started_at`, `current_stage` (`preparing` / `encoding`), `current_project`
+(`sequence_name`, `duration_sec`, `fps`, `width`, `height`), `current_progress` (`percent`,
+`elapsed_seconds`, `eta_seconds`, `speed`, `written_bytes`, `expected_bytes`, `encoded_sec`,
+`duration_sec`), `queue_pending` (nombre de projets en attente **hors job courant**), `batch`
+(`{completed, total, active}`), `processed`, `failed`, `aborted`, `last_error`, `encoder_available`,
+`encoder_engine`. La fonction `queue_snapshot()` fournit en plus la liste en lecture seule des
+projets en attente (`queue` : `job_id`, `file_name`, `display_name`, `is_assist`, `size_bytes`),
+rattachée dynamiquement par `/api/status`. Le tout est consommé par `/api/status` (panneau de suivi
+des encodages et ligne « Encodeur » de l'UI ; `encoder_engine` détaille ffmpeg/version/NVENC au survol).
 
 ## Journal
 

@@ -416,6 +416,25 @@ def get_status():
     encoder_state = encoder_worker.snapshot()
     encoder_state['running'] = encoder_alive
 
+    # File d'attente observée en lecture seule : elle inclut les projets soumis pendant
+    # l'encodage courant, que la boucle du worker ne voit qu'à la fin de ce job.
+    queue = encoder_worker.queue_snapshot()
+    encoder_state['queue'] = queue
+    encoder_state['queue_pending'] = len(queue)
+
+    batch = dict(encoder_state.get('batch') or {})
+    completed = int(batch.get('completed') or 0)
+    total = int(batch.get('total') or 0)
+    current_active = bool(encoder_state.get('current_job'))
+    if current_active:
+        total = max(total, completed + 1 + len(queue))
+    elif queue:
+        total = max(total, completed + len(queue))
+    batch['completed'] = min(completed, total)
+    batch['total'] = total
+    batch['active'] = bool(batch.get('active') or current_active or queue)
+    encoder_state['batch'] = batch
+
     with process_lock:
         running = script_running
 

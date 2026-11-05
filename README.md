@@ -12,7 +12,8 @@ quelle (ne jamais faire tourner les deux sur les mêmes projets en même temps).
 
 ## Fonctionnalités
 
-- **Interface web** : panneau de contrôle, options de soumission, console de logs temps réel (SSE).
+- **Interface web** : panneau de contrôle, options de soumission, suivi visuel des encodages
+  (progression globale du lot, job courant, file d'attente) et console de logs temps réel (SSE).
 - **Soumission** : scan de `/mnt/cache/*Camille*/projets/*.prproj` ; la variante `_assist.prproj`
   est prioritaire sur la version normale et produit le même MP4 (`X_assist.prproj` → `X.mp4`).
   Le nom final est déduit du fichier `.prproj` (préfixe numérique, « copy N » et `_assist` retirés,
@@ -20,8 +21,8 @@ quelle (ne jamais faire tourner les deux sur les mêmes projets en même temps).
 - **Encodeur prproj2ffmpeg** : file d'attente séquentielle (une session NVENC à la fois), sortie
   H.264 CBR 10 Mbps + audio AAC 320 kbps, à la cadence de la séquence, animations/calques alpha du
   projet fidèlement reproduits (keyframes Motion, overlays, **masques rectangle/ellipse**,
-  **Gaussian Blur** par clip), repli logiciel `libx264` automatique, progression estimée dans les
-  logs.
+  **Gaussian Blur** par clip), repli logiciel `libx264` automatique, progression estimée dans
+  l'interface et les logs.
 - **Moniteur d'exports** : surveillance du dossier de sortie, rapprochement déterministe par
   `job_id`, déplacement/renommage vers le dossier projet, versionnage des collisions
   (`_v1`, `_v2`), quarantaine si aucune correspondance, réessais en cas de verrou.
@@ -142,7 +143,7 @@ récupérables dans l'historique git (`git show 1eb0c56:backup_pre_prproj/...`).
 |---|---|
 | `GET /` , `GET|POST /login` , `GET /logout` | Interface et session |
 | `GET /api/health` | Santé du serveur (localhost uniquement) |
-| `GET /api/status` | `{running, monitor_running, encoder:{…}}` (état encodeur, file d'attente, job courant) |
+| `GET /api/status` | `{running, monitor_running, encoder:{…}}` (état encodeur, lot courant, file d'attente, progression du job) |
 | `POST /api/start` | Lance la soumission (`{force, clean_source_archive, clean_outputs}`) et reprend l'encodeur |
 | `POST /api/stop` | Arrête la soumission et met l'encodeur en pause (abandon du job en cours) |
 | `GET /api/logs/stream` | Logs temps réel (SSE) |

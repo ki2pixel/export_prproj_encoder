@@ -5,7 +5,8 @@ fond et lance la soumission en sous-processus.
 
 ## Rôles
 
-1. **Interface web** : page `/` (panneau de contrôle + console de logs), `/login`, `/logout`.
+1. **Interface web** : page `/` (panneau de contrôle, suivi des encodages + console de logs),
+   `/login`, `/logout`.
    - Authentification par session : `API_USER` / `API_PASSWORD` du `.env` (mot de passe temporaire
      fort généré et affiché en console si `API_PASSWORD` est vide).
    - Rate-limiting du login : 5 échecs par IP sur 5 minutes glissantes, blocage 5 minutes,
@@ -36,6 +37,11 @@ fond et lance la soumission en sous-processus.
    soumission ; `/api/logs/clear` vide les files.
 
 3. **Interface web et robustesse frontend** (`static/script.js`, `static/style.css`) :
+   - **Suivi visuel des encodages** : panneau dédié au-dessus de la console de logs avec
+     progression globale du lot (`(terminés + fraction en cours) / total`), carte de l'encodage en cours
+     (nom nettoyé, badge `assist`, métadonnées de séquence, pourcentage, vitesse, ETA, taille
+     écrite / attendue), file d'attente FIFO (hors job courant) et barres via `<progress>` natif
+     sans style inline (conforme CSP `style-src 'self'`).
    - **Polling unique** de `/api/status` toutes les 2 s, avec timeout de requête de 8 s
      (`AbortController`), verrou anti-exécution concurrente et suspension lorsque l'onglet est
      masqué (`visibilitychange`). Le retour sur l'onglet déclenche un rafraîchissement immédiat.
@@ -78,7 +84,7 @@ fond et lance la soumission en sous-processus.
 | `/login` | GET, POST | formulaire / connexion (CSRF requis en POST) |
 | `/logout` | GET, POST | destruction de session (l'UI utilise un formulaire POST avec CSRF ; GET cross-site refusé) |
 | `/api/health` | GET | `{"status": "ok"}` (loopback uniquement, sans proxy non authentifié ; 403 sinon) |
-| `/api/status` | GET | `{running, monitor_running, encoder:{running, paused, queue_pending, current_job, current_file, current_started_at, processed, failed, aborted, encoder_available, encoder_engine, last_error}}` |
+| `/api/status` | GET | `{running, monitor_running, encoder:{running, paused, queue_pending, queue, current_job, current_file, current_display_name, current_is_assist, current_stage, current_project, current_progress, batch, current_started_at, processed, failed, aborted, encoder_available, encoder_engine, last_error}}` |
 | `/api/start` | POST | `{force, clean_source_archive, clean_outputs}` (booléens stricts) → lance la soumission et reprend l'encodeur |
 | `/api/stop` | POST | arrête la soumission (`terminate()` puis `kill()` après 5 s) et met l'encodeur en pause en abandonnant le job en cours |
 | `/api/logs/stream` | GET | flux SSE (`text/event-stream`) |
