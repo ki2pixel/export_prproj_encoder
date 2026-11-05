@@ -55,6 +55,10 @@ python3 prproj2ffmpeg.py projet.prproj --dump                            # modè
     réelle du fichier (sinon les replays restent des `trim` séparés, corrects) ;
   - transformations Motion des overlays également supportées ; une image fixe à zoom/rotation
     animés est bouclée (`-loop 1`) pour que les keyframes soient évaluées sur la durée.
+- **Frame Hold natif** (`FrameHold` + `FrameHoldStart` sur un `VideoClip`) : la source est figée
+  sur la frame de `FrameHoldStart` pendant toute la durée de l'item, avant les filtres Motion,
+  masque et flou. Une ligne `[hold]` est journalisée. `HoldFilters=true` (effets figés) n'est pas
+  encore pris en charge : un avertissement est émis, les effets restent animés.
 - **Audio** : **toutes** les pistes (`A1`, `A2`, `A3`…), silences pour les trous, mixage `amix`
   compensé (`volume=N`), sortie AAC 320 kbps 48 kHz stéréo.
 - **Sortie** : H.264 8 bits (`yuv420p`), MP4 avec `+faststart`, à la fréquence de la séquence (25 fps dans nos projets).
@@ -63,7 +67,9 @@ python3 prproj2ffmpeg.py projet.prproj --dump                            # modè
 
 ### Ce que le script ne fait pas
 
-- Seuls les composants **Motion** et **Opacity** sont rendus : pas d'effets vidéo, transitions, fondus, mélanges, remap de vitesse, ni de texte/graphismes générés par Premiere.
+- Composants rendus : **Motion**, **Opacity**, masques `AE.ADBE AEMask2` (rectangle/ellipse) et
+  flou gaussien `AE.Impact_Blur_FX`. Les autres effets vidéo, transitions, fondus, mélanges,
+  remap de vitesse et texte/graphismes générés par Premiere ne sont pas rendus.
 - Les pistes autres que vidéo/audio standards (nested sequences, ajustements…) ne sont pas rendues.
 - Après une retouche manuelle dans Premiere, il faut **sauvegarder le projet puis relancer le script** (le XML est relu à chaque exécution).
 
@@ -71,6 +77,7 @@ python3 prproj2ffmpeg.py projet.prproj --dump                            # modè
 
 - **Intermédiaire 8 bits des médias alpha** : un ProRes 4444 10/12 bits est converti une fois en qtrle RGBA 8 bits (lossless, alpha exact) — décodage et conversion bien plus rapides, différence visuelle imperceptible. Cache dans `~/.cache/prproj2ffmpeg/` (ou `$XDG_CACHE_HOME`), clé = chemin + taille + date → reconstruction automatique si le média change.
 - **Crop alpha-bbox** : un overlay n'est composité que sur la zone réellement opaque de son média (calculée sur toutes ses frames), pas sur tout le cadre.
+- **Fenêtre visible des overlays** : un overlay statique (masque ou flou) n'est rastérisé que sur la zone qui touche le canvas — bbox du masque, ou intersection canvas/source élargie de 4σ pour un flou — au lieu du plan transformé complet (ex. 596 % → 11446×6439).
 - **Lecture en boucle fusionnée** : un élément rejoué N fois depuis son début devient un seul flux continu (`-stream_loop`), sans décodages ni buffers superflus — uniquement si la durée du replay couvre tout le fichier.
 - **Regroupement des segments** : les items contigus d'un même fichier partagent un seul décodeur, découpé en interne.
 - **Résolution des médias** : toutes les profondeurs de suffixe du chemin Windows sont essayées (pas seulement les 2 premiers segments), avec cache positif et négatif.

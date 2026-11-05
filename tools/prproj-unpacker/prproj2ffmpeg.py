@@ -282,6 +282,10 @@ class Clip:
         self.in_sec = 0.0
         self.out_sec = 0.0
         self.name = ''
+        # Frame Hold natif Premiere : la source est figée sur une frame précise
+        # (FrameHoldStart) pendant toute la durée de l'item. None = pas de hold.
+        self.hold_sec = None
+        self.hold_filters = False
 
     def duration(self, fallback):
         d = self.out_sec - self.in_sec
@@ -442,6 +446,20 @@ class Project:
             return clip
         clip.in_sec = to_sec(text(inner, 'InPoint'), 0.0) or 0.0
         clip.out_sec = to_sec(text(inner, 'OutPoint'), 0.0) or 0.0
+        # Frame Hold natif : FrameHold != 0 fige la source sur FrameHoldStart (temps
+        # source, même base que InPoint/OutPoint) pendant toute la durée de l'item.
+        hold = text(outer, 'FrameHold')
+        if hold is not None:
+            try:
+                hold_enabled = int(float(hold.strip() or '0')) != 0
+            except ValueError:
+                hold_enabled = hold.strip().lower() not in ('', '0', 'false')
+            if hold_enabled:
+                hold_start = text(outer, 'FrameHoldStart')
+                clip.hold_sec = (to_sec(hold_start, clip.in_sec)
+                                 if hold_start not in (None, '') else clip.in_sec)
+                clip.hold_filters = ((text(outer, 'HoldFilters', 'false') or '')
+                                     .strip().lower() == 'true')
         source = ref(self.by_id, self.by_uid, inner, 'Source')
         if source is not None:
             media_el = ref(self.by_id, self.by_uid, source, 'MediaSource/Media') or \
@@ -933,6 +951,30 @@ def clip_times(item):
     return cin, dur
 
 
+def hold_frame_filter(dur, start_pts=0.0):
+    """Filtre ffmpeg : une seule frame source répétée pendant `dur`.
+
+    L'entrée doit commencer sur la frame à figer (pull `-ss FrameHoldStart` ou
+    `trim=start=…` de la piste de base). `trim=end_frame=1` ne garde qu'une frame,
+    même si le pull en contient deux à cause de l'arrondi du `-t`.
+    """
+    return (f"trim=end_frame=1,setpts=PTS-STARTPTS,"
+            f"tpad=stop_mode=clone:stop_duration={dur:.6f},"
+            f"trim=duration={dur:.6f},"
+            f"setpts=PTS-STARTPTS+{start_pts:.6f}/TB")
+
+
+def item_trim(item, cin, cout, run_in):
+    """Trim source d'un item, ou boucle d'une frame figée (Frame Hold natif)."""
+    dur = item.end - item.start
+    if item.clip is not None and item.clip.hold_sec is not None:
+        local = item.clip.hold_sec - run_in
+        return (f"trim=start={local:.6f},setpts=PTS-STARTPTS,"
+                + hold_frame_filter(dur))
+    return (f"trim=start={cin - run_in:.6f}:end={cout - run_in:.6f},"
+            f"setpts=PTS-STARTPTS")
+
+
 # ------------------------------------------------------- media cache / analysis
 
 _probe_cache = {}
@@ -1054,6 +1096,23 @@ def _note_alpha_end(path, end, bases):
         return
     key = os.path.abspath(resolved)
     _alpha_limits[key] = max(_alpha_limits.get(key, 0.0), float(end))
+
+
+def safe_hold_sec(item, bases, fps):
+    """FrameHoldStart borné à la durée réelle du média (None si pas de hold).
+
+    Le hold peut être demandé hors de la plage In/Out du clip (Frame Hold sur une
+    timecode source), mais jamais au-delà du fichier : un `-ss` après EOF produirait
+    un flux vide et ferait échouer tout le graphe.
+    """
+    if item.clip is None or item.clip.hold_sec is None:
+        return None
+    hold = item.clip.hold_sec
+    resolved = resolve_media(item.clip.source_path, bases)
+    duration = probe_duration(resolved) if resolved else 0.0
+    if duration and duration > 1e-6:
+        hold = min(max(0.0, hold), max(0.0, duration - 1.0 / max(1e-6, fps)))
+    return hold
 
 
 def _alpha_meta_path(mov_path):
@@ -1590,6 +1649,11 @@ def _opacity_scalar(param):
 _BLUR_SIGMA_FACTOR = 3.0
 
 
+# Marge (en écarts-types) ajoutée autour de la fenêtre visible d'un overlay flou :
+# le crop ne doit pas couper la diffusion gaussienne avant l'overlay.
+_BLUR_WINDOW_SIGMA = 4.0
+
+
 def crop_window_fits(item, seq_w, seq_h, isw, ish):
     """Vrai si le chemin « fenêtre de crop » peut rendre l'item fidèlement.
 
@@ -1763,29 +1827,50 @@ def _static_uniform_transform(item, src_w, src_h, seq_w, seq_h):
 
 
 def visible_overlay_window(item, src_w, src_h, seq_w, seq_h):
-    """(cx, cy, cw, ch, ox, oy, ow, oh) for a static masked overlay, or None.
+    """(cx, cy, cw, ch, ox, oy, ow, oh) d'un overlay statique optimisable, ou None.
 
-    The window is the transformed mask box itself, not the canvas intersection:
-    the scale factor stays as close as possible to the full-frame transform and
-    overlay clips the parts outside the frame. `cx`/`cy` are aligned on even
-    pixels for chroma (with `crop=…:exact=1` in the caller); a window that stays
-    odd falls back to RGBA. A blurred overlay never takes this shortcut (the crop
-    would clip the blur spread).
+    Pour un overlay masqué, la fenêtre est la bbox transformée du masque : le facteur
+    d'échelle reste aussi proche que possible de la transformation pleine et l'overlay
+    coupe les parties hors cadre. Pour un overlay **sans masque mais flou**, la fenêtre
+    est l'intersection canvas/source, élargie de 4σ pour ne pas couper la diffusion du
+    flou. `cx`/`cy` sont alignés sur des pixels pairs pour le chroma (avec
+    `crop=…:exact=1` dans l'appelant) ; une fenêtre qui reste impaire bascule en RGBA.
+
+    Les overlays masqués + flous conservent le chemin composition complet.
     """
-    if not item.masks or item.blur is not None:
+    if not item.masks and item.blur is None:
+        return None
+    if item.masks and item.blur is not None:
         return None
     transform = _static_uniform_transform(item, src_w, src_h, seq_w, seq_h)
     if transform is None:
         return None
     x0, y0, sx, sy = transform
-    bbox = _mask_union_bbox_px(item, src_w, src_h)
-    if bbox is None:
-        return None
-    mx0, my0, mx1, my1 = bbox
     w_int, h_int = int(round(src_w)), int(round(src_h))
+    if item.masks:
+        bbox = _mask_union_bbox_px(item, src_w, src_h)
+        if bbox is None:
+            return None
+        simple_rect = _is_simple_opaque_rect_mask(item)
+    else:
+        # Overlay flou sans masque : ne rastériser que la partie qui touche le canvas,
+        # avec une marge de 4σ (en pixels source) pour la diffusion gaussienne.
+        vx0 = max(0.0, (0.0 - x0) / sx)
+        vx1 = min(float(src_w), (seq_w - x0) / sx)
+        vy0 = max(0.0, (0.0 - y0) / sy)
+        vy1 = min(float(src_h), (seq_h - y0) / sy)
+        if vx1 <= vx0 or vy1 <= vy0:
+            return None
+        sigma = max(0.1, item.blur.amount * _BLUR_SIGMA_FACTOR)
+        margin = _BLUR_WINDOW_SIGMA * sigma
+        bbox = (max(0.0, vx0 - margin / sx),
+                max(0.0, vy0 - margin / sy),
+                min(float(src_w), vx1 + margin / sx),
+                min(float(src_h), vy1 + margin / sy))
+        simple_rect = False
+    mx0, my0, mx1, my1 = bbox
     cx = max(0, min(int(math.floor(mx0)), w_int - 2))
     cy = max(0, min(int(math.floor(my0)), h_int - 2))
-    simple_rect = _is_simple_opaque_rect_mask(item)
     if not simple_rect:
         cx &= ~1
         cy &= ~1
@@ -1797,6 +1882,10 @@ def visible_overlay_window(item, src_w, src_h, seq_w, seq_h):
             cw += 1
         if ch & 1 and cy + ch + 1 <= h_int:
             ch += 1
+    # Flou sans masque : si la fenêtre couvre déjà toute la source, le chemin complet
+    # est équivalent (et évite de changer le rendu des overlays plein cadre).
+    if not item.masks and cw >= w_int and ch >= h_int:
+        return None
     ox = int(round(x0 + cx * sx))
     oy = int(round(y0 + cy * sy))
     ow = max(2, int(round(cw * sx)))
@@ -1884,6 +1973,9 @@ def merge_loop_groups(items, bases):
         """True only for a replay of the whole source file from its start."""
         cin, cdur = clip_times(item)
         if item.clip.still or item.masks or item.blur is not None:
+            return False
+        if item.clip.hold_sec is not None:
+            # Un Frame Hold ne rejoue pas le média : il répète une frame unique.
             return False
         if cin >= 1e-6:
             return False
@@ -2095,6 +2187,13 @@ def main():
     if not src_w or not src_h:
         die('source media dimensions missing in XML')
 
+    # Frame Hold : borner chaque FrameHoldStart à la durée réelle du média une seule
+    # fois, avant le dump et la construction du graphe (le dump montre la valeur finale).
+    for item in base + overlays:
+        hold = safe_hold_sec(item, bases, fps)
+        if hold is not None:
+            item.clip.hold_sec = hold
+
     total = max([i.end for i in base] + [i.end for i in overlays] + [0.0])
 
     if args.dump:
@@ -2108,6 +2207,8 @@ def main():
                 {
                     'start': i.start, 'end': i.end,
                     'in': i.clip.in_sec, 'out': i.clip.out_sec,
+                    'hold': i.clip.hold_sec,
+                    'hold_filters': i.clip.hold_filters,
                     'scale': i.scale_w / 100.0,
                     'window': [int(round(seq_w / (i.scale_w / 100.0))),
                                int(round(seq_h / (i.scale_w / 100.0)))],
@@ -2135,6 +2236,8 @@ def main():
                 {
                     'start': o.start, 'end': o.end,
                     'path': o.clip.source_path, 'size': [o.clip.source_w, o.clip.source_h],
+                    'hold': o.clip.hold_sec,
+                    'hold_filters': o.clip.hold_filters,
                     'scale': [o.scale_w / 100.0, o.scale_h / 100.0],
                     'anchor': list(o.anchor),
                     'position_static': list(o.position.static) if o.position and o.position.static else None,
@@ -2159,9 +2262,21 @@ def main():
     # bbox ne couvrent que le préfixe [0, fin utilisé], jamais les rushes non montés.
     # On conserve le préfixe (pas de -ss) pour ne décaler aucun horodatage.
     _alpha_limits.clear()
+    seen_hold_warning = set()
+    for item in base + overlays:
+        if item.clip.hold_sec is None or not item.clip.hold_filters:
+            continue
+        key = (item.clip.source_path, item.clip.hold_sec)
+        if key in seen_hold_warning:
+            continue
+        seen_hold_warning.add(key)
+        print(f"[hold] HoldFilters=true ignoré pour '{item.clip.name}' : "
+              "les effets animés ne sont pas figés", flush=True)
     for item in base:
         cin, cdur = clip_times(item)
-        _note_alpha_end(item.clip.source_path, cin + cdur, bases)
+        hold = safe_hold_sec(item, bases, fps)
+        _note_alpha_end(item.clip.source_path,
+                        (hold + 1.0 / fps) if hold is not None else (cin + cdur), bases)
     overlay_groups = []
     for layer in layers:
         overlay_groups.extend(merge_loop_groups(layer, bases))
@@ -2169,7 +2284,10 @@ def main():
         ov = group[0]
         if ov.clip.still:
             continue
-        if len(group) > 1:
+        hold = safe_hold_sec(ov, bases, fps)
+        if hold is not None:
+            _note_alpha_end(ov.clip.source_path, hold + 1.0 / fps, bases)
+        elif len(group) > 1:
             _note_alpha_end(ov.clip.source_path, span_end - ov.start, bases)
         else:
             cin, cdur = clip_times(ov)
@@ -2199,6 +2317,15 @@ def main():
         for item in items:
             cin, cdur = clip_times(item)
             cout = cin + cdur
+            if item.clip is not None and item.clip.hold_sec is not None:
+                hold = safe_hold_sec(item, bases, fps)
+                if hold is not None and (hold < cin - 1e-6 or hold > cout + 1e-6):
+                    # Frame tenue hors de la plage In/Out : le run normal ne couvre pas
+                    # cette frame, on crée un pull dédié (une seule frame).
+                    runs.append({'path': item.clip.source_path, 'in': hold,
+                                 'out': hold + 2.0 / fps,
+                                 'items': [(item, hold, hold + 2.0 / fps)]})
+                    continue
             if runs and runs[-1]['path'] == item.clip.source_path and abs(cin - runs[-1]['out']) < 1e-6:
                 runs[-1]['out'] = cout
                 runs[-1]['items'].append((item, cin, cout))
@@ -2224,8 +2351,10 @@ def main():
                                f"setsar=1,format=yuv420p[vg{n}]")
                 video_labels.append(f"[vg{n}]")
             src_label = f"[vr{r}_{j}]" if k > 1 else f"[{p}:v]"
-            trim = (f"trim=start={cin - run['in']:.6f}:end={cout - run['in']:.6f},"
-                    f"setpts=PTS-STARTPTS")
+            trim = item_trim(item, cin, cout, run['in'])
+            if item.clip.hold_sec is not None:
+                print(f"[hold] '{item.clip.name}' figé sur {item.clip.hold_sec:.3f} s "
+                      f"({item.end - item.start:.3f} s)", flush=True)
             isw = item.clip.source_w or src_w
             ish = item.clip.source_h or src_h
             # Le chemin « fenêtre de crop » ne peut pas rendre fidèlement un item dont la
@@ -2304,6 +2433,12 @@ def main():
         if ov.clip.still:
             image_inputs.append((ov_path, has_animated_transform(ov)))
             plan.append((group, cin, span_end, 'still', len(image_inputs) - 1, ov_path))
+        elif ov.clip.hold_sec is not None:
+            # Frame Hold : une seule frame à FrameHoldStart, répétée par le filtre.
+            hold = ov.clip.hold_sec
+            p = get_pull(ov.clip.source_path, hold, hold + 2.0 / fps,
+                         unique=True, alpha_ok=True)
+            plan.append((group, cin, span_end, 'hold', p, alpha_intermediate(ov_path)))
         elif len(group) > 1:
             span = span_end - ov.start
             p = get_pull(ov.clip.source_path, 0.0, span, alpha_ok=True, loop_span=span)
@@ -2316,6 +2451,7 @@ def main():
         ov = group[0]
         looped = kind == 'loop'
         is_still = kind == 'still'
+        is_hold = kind == 'hold'
         src_label = f"[IMG{idx}:v]" if is_still else f"[{idx}:v]"
         ow = ov.clip.source_w or seq_w
         oh = ov.clip.source_h or seq_h
@@ -2328,7 +2464,11 @@ def main():
         head = []
         if not is_still:
             start_pts = max(0.0, ov.start - shift)
-            if looped:
+            if is_hold:
+                head.append(hold_frame_filter(span_end - ov.start, start_pts))
+                print(f"[hold] '{ov.clip.name}' figé sur {ov.clip.hold_sec:.3f} s "
+                      f"({span_end - ov.start:.3f} s)", flush=True)
+            elif looped:
                 head.append(f"setpts=N/({fps:.6f}*TB)+{start_pts:.6f}/TB")
             else:
                 head.append(f"setpts=PTS-STARTPTS+{start_pts:.6f}/TB")
@@ -2336,7 +2476,7 @@ def main():
         # Fenêtre visible d'un overlay à transformation statique : évite de rastériser
         # des plans entiers (ex. zoom 252 % -> 4838x2722) qui sont ensuite recadrés.
         window = None
-        if bbox_part is None and ov.masks and ov.blur is None:
+        if bbox_part is None and (ov.masks or ov.blur is not None):
             window = visible_overlay_window(ov, ow, oh, seq_w, seq_h)
         if window is not None:
             cx, cy, cw, ch, ox, oy, out_w, out_h = window

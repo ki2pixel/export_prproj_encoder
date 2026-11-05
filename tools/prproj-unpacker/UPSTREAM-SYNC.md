@@ -101,6 +101,18 @@
     ellipse non bornée, toutes les pistes audio mixées (`amix` compensé), résolution des médias à
     profondeur complète avec cache, `-bufsize = 2 × débit` et libx264 sans `-crf`, purge LRU après
     graphe avec pulls protégés, `.bbox.json` atomique et `axis_expr` équilibré.
+14. **Frame Hold natif (2026-11-04)** : `FrameHold` / `FrameHoldStart` (et `HoldFilters`) lus sur
+    le `VideoClip` ; la frame est répétée sur toute la durée de l'item via
+    `trim=end_frame=1,tpad=stop_mode=clone,…` avant Motion/masque/flou. La piste de base utilise
+    `item_trim()` (et isole un pull si la frame sort de la plage In/Out) ; les overlays ont une
+    branche `kind='hold'`. `safe_hold_sec()` borne la frame à la durée du média ; la préparation
+    alpha ne couvre que la frame tenue ; `merge_loop_groups()` exclut les holds. Limite :
+    `HoldFilters=true` non appliqué (avertissement).
+15. **Fenêtre visible des overlays flous (2026-11-04)** : `visible_overlay_window()` accepte un
+    overlay sans masque, à transformation statique uniforme et flou : intersection canvas/source
+    élargie de 4σ, crop pair et décalage de l'`overlay`. Les overlays flous masqués ou animés
+    restent en composition. Cas réel (overlay 596 %, flou 50, dernier segment) :
+    11446×6439 → 2289×1562, 31,3 s → 3,8 s sur 2 s (PSNR 52,3 dB / SSIM 0,9993).
 
 ## Limites connues de la copie actuelle
 
@@ -115,9 +127,11 @@
   une boîte dont le contenu est fin — un média dont le recadrage échoue n'est jamais découpé, et une
   ligne `[bbox]` est journalisée à chaque recadrage retenu.
 - Fenêtre visible : seuls les overlays à transformation statique uniforme, sans rotation, avec
-  masque non inversé sont optimisés ; le zoom est rééchantillonné depuis la bbox du masque, d'où
-  un possible déphasage sous-pixel par rapport au scale plein cadre. La piste de base reste en
-  composition dès que `crop_window_fits()` est faux.
+  masque non inversé (ou flou sans masque, marge 4σ) sont optimisés ; le zoom est rééchantillonné
+  depuis la bbox du masque, d'où un possible déphasage sous-pixel par rapport au scale plein
+  cadre. La piste de base reste en composition dès que `crop_window_fits()` est faux.
+- Frame Hold : `HoldFilters=true` (figer aussi les effets animés) n'est pas appliqué ; la frame
+  est figée avant les filtres Motion/masque/flou et un avertissement est journalisé.
 - Préparation alpha : seule la fin de la plage utilisée est bornée ; un média utilisé uniquement
   tard dans sa source transcode encore son préfixe (`-ss` + remap non implémentés pour préserver
   les horodatages). `PRPROJ2FFMPEG_ALPHA_FULL_TAIL_MAX` (défaut 15 s) peut convertir en pleine

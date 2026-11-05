@@ -386,6 +386,8 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.assertIn("analyse alpha", summarize_line("[bbox] analyse alpha de 'logo.mov' (0-61.5 s)…"))
         self.assertIn("repli libx264", summarize_line(
             "[encoder] h264_nvenc indisponible (GPU/session NVENC), repli libx264"))
+        self.assertIn("prproj2ffmpeg: [hold]", summarize_line(
+            "[hold] 'clip.mp4' figé sur 475.560 s (10.960 s)"))
         self.assertIn("commande ffmpeg", summarize_line("ffmpeg -y -hide_banner -i a.prproj -filter_complex [0:v]trim=…"))
         self.assertIn("ERREUR: ffmpeg", summarize_line("/usr/bin/ffmpeg: No such file or directory"))
 
@@ -515,6 +517,39 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.assertIsNotNone(window)
         for value in window[:4]:
             self.assertEqual(value & 1, 0, window)
+
+    def test_visible_overlay_window_flou_sans_masque(self):
+        """Cas réel « La revue de presse » : overlay 596 % flou (Amount 50).
+
+        La fenêtre est l'intersection canvas/source élargie de 4σ, soit 384x262
+        en source au lieu du plan complet 11446x6439.
+        """
+        engine = load_prproj2ffmpeg()
+        item = self._overlay_item(
+            engine, 596.1650390625,
+            (0.7828653626621884, 0.4990992228190104),
+            (0.8035364583333333, 0.0))
+        item.blur = engine.BlurFx()
+        item.blur.amount = 50.0
+        self.assertEqual(
+            engine.visible_overlay_window(item, 1920, 1080, 1080, 1920),
+            (1300, 0, 384, 262, -602, 958, 2289, 1562))
+
+        # Le crop doit rester très inférieur au scale plein cadre.
+        window = engine.visible_overlay_window(item, 1920, 1080, 1080, 1920)
+        self.assertLess(window[6] * window[7], (11446 * 6439) // 20)
+
+        # Sans masque ni flou, le chemin composition reste inchangé.
+        item.blur = None
+        self.assertIsNone(engine.visible_overlay_window(item, 1920, 1080, 1080, 1920))
+
+        # Un flou sur une position animée ne prend pas la fenêtre.
+        item.blur = engine.BlurFx()
+        item.blur.amount = 50.0
+        item.position = types.SimpleNamespace(
+            kind='point', static=(0.78, 0.5),
+            kfs=[types.SimpleNamespace(t=1.0, x=0.78, y=0.5, ix=0, iy=0, ox=0, oy=0)])
+        self.assertIsNone(engine.visible_overlay_window(item, 1920, 1080, 1080, 1920))
 
     def test_simple_opaque_rect_mask(self):
         engine = load_prproj2ffmpeg()
@@ -1135,6 +1170,99 @@ class TestAMEWatchfolder(unittest.TestCase):
 
             still = self._clip_item(engine, 0.0, 10.0, still=True)
             self.assertEqual(len(engine.merge_loop_groups([still], [])), 1)
+
+            # Un Frame Hold répète une frame, il ne rejoue jamais le média.
+            held = self._clip_item(engine, 10.0, 20.0)
+            held.clip.hold_sec = 1.0
+            self.assertEqual(
+                len(engine.merge_loop_groups([self._clip_item(engine, 0.0, 10.0), held], [])), 2)
+
+    def test_frame_hold_parse_et_trim(self):
+        """FrameHold / FrameHoldStart : source figée pendant tout l'item."""
+        engine = load_prproj2ffmpeg()
+        xml = """<?xml version="1.0" encoding="UTF-8" ?>
+<PremiereData Version="3">
+  <VideoClip ObjectID="10">
+    <Clip Version="18">
+      <Source ObjectRef="20"/>
+      <InPoint>1000000000000</InPoint>
+      <OutPoint>2000000000000</OutPoint>
+    </Clip>
+    <FrameHold>4</FrameHold>
+    <FrameHoldStart>120799848960000</FrameHoldStart>
+  </VideoClip>
+  <VideoClip ObjectID="11">
+    <Clip Version="18">
+      <Source ObjectRef="20"/>
+      <InPoint>1000000000000</InPoint>
+      <OutPoint>2000000000000</OutPoint>
+    </Clip>
+  </VideoClip>
+  <VideoClip ObjectID="12">
+    <Clip Version="18">
+      <Source ObjectRef="20"/>
+      <InPoint>1000000000000</InPoint>
+      <OutPoint>2000000000000</OutPoint>
+    </Clip>
+    <FrameHold>4</FrameHold>
+    <HoldFilters>true</HoldFilters>
+  </VideoClip>
+  <SubClip ObjectID="30">
+    <Clip ObjectRef="10"/>
+    <Name>hold.mp4</Name>
+  </SubClip>
+  <SubClip ObjectID="31">
+    <Clip ObjectRef="11"/>
+    <Name>plain.mp4</Name>
+  </SubClip>
+  <SubClip ObjectID="32">
+    <Clip ObjectRef="12"/>
+    <Name>hold_sans_start.mp4</Name>
+  </SubClip>
+</PremiereData>
+"""
+        parsed = engine.Project('memoire.xml', xml_bytes=xml.encode())
+
+        held = parsed._clip_of(parsed.by_id['30'])
+        self.assertAlmostEqual(held.hold_sec, 475.56, places=6)
+        self.assertFalse(held.hold_filters)
+        self.assertEqual(held.name, 'hold.mp4')
+
+        plain = parsed._clip_of(parsed.by_id['31'])
+        self.assertIsNone(plain.hold_sec)
+
+        # FrameHoldStart absent : repli sur InPoint ; HoldFilters est lu.
+        sans_start = parsed._clip_of(parsed.by_id['32'])
+        self.assertAlmostEqual(sans_start.hold_sec, 1000000000000 / engine.TICKS, places=6)
+        self.assertTrue(sans_start.hold_filters)
+
+        # Trim de la piste de base : la frame tenue est décodée localement puis répétée.
+        item = self._clip_item(engine, 471.96, 482.92, in_s=471.96, out_s=482.92)
+        item.clip.hold_sec = 475.56
+        trim = engine.item_trim(item, 471.96, 482.92, 471.96)
+        self.assertTrue(trim.startswith('trim=start=3.600000,setpts=PTS-STARTPTS,'), trim)
+        self.assertIn('trim=end_frame=1', trim)
+        self.assertIn('tpad=stop_mode=clone:stop_duration=10.960000', trim)
+        self.assertIn('trim=duration=10.960000', trim)
+
+        # Hold isolé dans un pull dédié : la frame est à l'origine du run.
+        trim = engine.item_trim(item, 475.56, 475.56 + 2 / 25.0, 475.56)
+        self.assertTrue(trim.startswith('trim=start=0.000000,setpts=PTS-STARTPTS,'), trim)
+
+        # Bornage à la durée réelle du média (FrameHoldStart hors fichier).
+        with patch.object(engine, 'resolve_media', return_value='/tmp/hold.mp4'), \
+             patch.object(engine, 'probe_duration', return_value=480.0):
+            item.clip.hold_sec = 999.0
+            self.assertAlmostEqual(engine.safe_hold_sec(item, [], 25.0), 479.96)
+            item.clip.hold_sec = None
+            self.assertIsNone(engine.safe_hold_sec(item, [], 25.0))
+
+    def test_hold_frame_filter(self):
+        engine = load_prproj2ffmpeg()
+        chain = engine.hold_frame_filter(10.96, 471.94)
+        self.assertIn('trim=end_frame=1', chain)
+        self.assertIn('setpts=PTS-STARTPTS+471.940000/TB', chain)
+        self.assertIn('trim=duration=10.960000', chain)
 
     def test_pull_table_collisions(self):
         engine = load_prproj2ffmpeg()

@@ -549,7 +549,7 @@ def summarize_line(raw_line: str) -> str | None:
         return f"ERREUR: prproj2ffmpeg — {detail}"
     if text.startswith('done:'):
         return f"✓ Export terminé : {text[len('done:'):].strip()}"
-    if text.startswith(('[cache]', '[bbox]', '[encoder]')):
+    if text.startswith(('[cache]', '[bbox]', '[encoder]', '[hold]')):
         return f"prproj2ffmpeg: {text}"
     # Ligne de commande générée par le script (elle commence toujours par « ffmpeg -… ») ;
     # la bannière « ffmpeg version … » reste au journal.

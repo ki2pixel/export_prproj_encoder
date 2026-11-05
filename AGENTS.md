@@ -30,7 +30,8 @@ diffusée en SSE). `LogPublisher` (max 50 clients, files de 500 messages) alimen
 - **`tools/prproj-unpacker/`** — `prproj2ffmpeg.py` vendorisé (voir `PROVENANCE.md` et
   `UPSTREAM-SYNC.md`), `unpack.pl` et LICENSE. La source d'origine est introuvable depuis le
   2026-10-13 : cette copie est désormais **la copie de référence** ; les correctifs locaux y sont
-  documentés et la re-synchronisation est décrite dans `UPSTREAM-SYNC.md`.
+  documentés et la re-synchronisation est décrite dans `UPSTREAM-SYNC.md`. Frame Hold natif
+  (`FrameHold`/`FrameHoldStart`) et fenêtre visible des overlays flous (marge 4σ) sont rendus.
 - **`encoder_worker.py`** — file d'attente par scrutation de `WATCH_IN`, encodage séquentiel,
   sortie en `WATCH_OUT/.staging/` puis publication atomique, adoption des projets déposés à la main,
   reprise des jobs orphelins, pause/abandon.

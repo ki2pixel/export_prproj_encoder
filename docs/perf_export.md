@@ -135,6 +135,30 @@ Recommandation : pour un lot de séquences partageant un média, exporter la plu
 (ou régler `PRPROJ2FFMPEG_ALPHA_FULL_TAIL_MAX=60` dans `.env`). Le défaut 15 s reste prudent
 pour un export isolé.
 
+## Frame Hold et overlay flou (2026-11-04)
+
+Projet `309 Camille` / `PP - La revue de presse - Karine Dubernet_9x16` (482,92 s, 1080×1920,
+25 fps). Deux Frame Hold natifs sur V2/V3 et, sur le dernier segment, un overlay à **596 %** avec
+flou gaussien `Amount 50` (σ = 150) qui construisait une image **11446×6439** (73,7 Mpx) pour
+n'en afficher qu'une fenêtre de ~181×161 px.
+
+| Mesure | Avant | Après |
+| --- | --- | --- |
+| Export complet (cache chaud) | 275,8 s | **154,1 s** |
+| Dernier segment, 2 s | 31,3 s | **3,8 s** |
+| Dernier segment complet (10,96 s) | ~150 s | **~12,2 s** |
+| Graphe flou | `scale=11446:6439` plein cadre | `crop=384:262:1300:0` + `scale=2289:1562` |
+
+La fenêtre de l'overlay flou est l'intersection canvas/source élargie de **4σ** (600 px en
+sortie, ~101 px en source), alignée sur des pixels pairs. Fidélité face au rendu complet (même
+hold) : **PSNR 52,3 dB / SSIM 0,9993**. Hors dernier segment, les frames à 10/60/150/300/460 s
+sont bit-à-bit identiques à l'export précédent (SSIM 1,0).
+
+Le Frame Hold fige la frame de `FrameHoldStart` (475,56 s) sur toute la durée de l'item :
+`trim=end_frame=1,tpad=stop_mode=clone:stop_duration=…`. Sur la zone du poster, le SSIM
+passe de **0,126** (473→481 s) et **0,479** (476→481 s) à **0,992–1,000** entre 476 et 482,5 s
+(PSNR 46,4 dB, écart d'encodage). `HoldFilters=true` n'est pas encore appliqué.
+
 ## Reproduire
 
 ```bash
@@ -165,8 +189,8 @@ Pour isoler les filtres du bruit d'encodage, produire les extraits en lossless
 
 ## Limites
 
-- Seuls les overlays à transformation statique uniforme, sans rotation, avec masque non inversé
-  sont optimisés.
+- Seuls les overlays à transformation statique uniforme et sans rotation sont optimisés :
+  masque non inversé, ou flou sans masque (marge de 4σ).
 - La préparation alpha reste le coût dominant à froid ; le cache qtrle et les sidecars évitent
   de la refaire à chaud et entre séquences.
 - L'index ne couvre que les intermédiaires créés par cette version (les anciens restent trouvés

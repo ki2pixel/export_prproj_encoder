@@ -10,9 +10,9 @@ Copie vendorisée depuis le dépôt de conception de l'auteur (outil maison) :
 
 | Fichier | SHA-256 | État |
 | --- | --- | --- |
-| `prproj2ffmpeg.py` | `fb840ffbf2e5edc2c5727871f593953d01c60c3bb9ae5c04967251f42bd8d941` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23)** (voir ci-dessous) |
+| `prproj2ffmpeg.py` | `382d1de016066074cc489a7dddab5ffd932ea4d1e2ff3d6bed63b21c515b2591` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04)** (voir ci-dessous) |
 | `unpack.pl` | `e8aa19fccb148f86160eda3f3da0d5644cc7b435753010e0ef318e269997fbab` | copie conforme |
-| `README.md` | `e3edd2434ce382030347ac097053daff2179a52d2c7c490e2d6c746e2ead3965` | copie **+ documentation des correctifs d'audit (2026-10-23)** |
+| `README.md` | `bf50cdb6bbde672a4df542d39f3c9cd71183827faaf409d59088248eb4f85dfa` | copie **+ documentation des correctifs d'audit (2026-10-23) + Frame Hold et fenêtre floue (2026-11-04)** |
 | `LICENSE` | `09c65776ef866a5f0c184a5c52331807e954ba74c074b62e3617884ef864ad8b` | copie conforme |
 
 Empreinte de l'original (avant modifications) :
@@ -156,6 +156,28 @@ Empreinte de l'original (avant modifications) :
       écrit atomiquement, nettoyage des `.bbox.json.tmp` de plus de 24 h, `axis_expr` en arbre
       équilibré.
 
+14. **Frame Hold natif (2026-11-04)** — lecture de `FrameHold` / `FrameHoldStart` (et
+    `HoldFilters`) dans le `VideoClip` ; la source est figée sur la frame de `FrameHoldStart`
+    pendant toute la durée de l'item, avant les filtres Motion/masque/flou :
+    `trim=end_frame=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=…`.
+    - **Piste de base** : `item_trim()` remplace le `trim` source par `trim=start=hold-run_in`
+      suivi du hold ; si `FrameHoldStart` sort de la plage In/Out, `group_runs()` isole un pull
+      d'une seule frame.
+    - **Overlays** : nouvelle branche `kind='hold'`, pull `-ss hold -t 2/fps` puis hold avant le
+      décalage temporel habituel.
+    - **Bornage** : `safe_hold_sec()` limite la frame à la durée réelle du média ; la préparation
+      alpha et la fenêtre visible ne couvrent que la frame tenue.
+    - **Limite** : `HoldFilters=true` n'est pas appliqué (effets animés rendus normalement, avec
+      avertissement `[hold] HoldFilters=true ignoré…`). `merge_loop_groups()` exclut les holds.
+15. **Fenêtre visible des overlays flous (2026-11-04)** — `visible_overlay_window()` accepte
+    désormais un overlay **sans masque** à transformation statique uniforme portant un flou :
+    la fenêtre est l'intersection canvas/source élargie de **4σ** (σ = `Amount × 3`), alignée sur
+    des pixels pairs, puis `cx/cy` sont décalés dans l'expression `overlay`. Un overlay flou
+    masqué, animé ou tourné conserve le chemin composition. Cas réel `PP - La revue de presse -
+    Karine Dubernet_9x16` (dernier segment, overlay 596 %, flou Amount 50 → σ 150) :
+    `scale=11446:6439` + `gblur` plein cadre → `crop=384:262:1300:0` + `scale=2289:1562` ;
+    2 s du segment **31,3 s → 3,8 s** (PSNR 52,3 dB / SSIM 0,9993 face au rendu complet).
+
 **Validation** : W9 `mask_blur` (masque sur le 3ᵉ clip + flou sur le 4ᵉ) conforme aux captures
 Premiere ; Mabille : 3 masques sur la piste V2, split screens cadrés et synchronisés (apparition à
 la première image) ; projet 138 sans masque identique au rendu d'avant la fonctionnalité (SSIM :
@@ -193,6 +215,15 @@ PSNR **35,97 dB** contre **35,45 dB** avant (SSIM 0,9835 contre 0,9874). Hors fe
 scripts sont bit-à-bit identiques (SSIM 1,0). `--dump` GOAL OK, `--dry-run` sans
 `.prproj2ffmpeg-tmp.xml`.
 
+**Validation 2026-11-04 (Frame Hold + fenêtre visible des overlays flous)** : projet
+`309 Camille` / `PP - La revue de presse - Karine Dubernet_9x16` (Frame Hold sur V2 et V3,
+dernier segment, overlay 596 % flou Amount 50). Export complet **275,8 s → 154,1 s** (même
+machine, cache chaud). Le poster du Frame Hold est désormais fixe : SSIM 0,126 (473→481) et
+0,479 (476→481) avant correctif, **0,992 à 1,000** entre 476 et 482,5 après (PSNR 46,4 dB,
+bruit d'encodage). Hors dernier segment, les frames à 10/60/150/300/460 s sont **bit-à-bit
+identiques** à l'export précédent (SSIM 1,0). Sur 2 s du dernier segment, le graphe flou passe
+de 31,3 s à **3,8 s** (PSNR 52,3 dB / SSIM 0,9993 face au rendu complet). Tests unitaires 78/78.
+
 ## Procédure de synchronisation avec la source
 
 Voir `UPSTREAM-SYNC.md` (état, procédure de génération du diff source → copie, liste des
@@ -204,10 +235,12 @@ changements, limites).
   l'union (Add) et l'inversion non reproduits.
 - Flou : isotrope (`gblur`) ; `Thickness`/`Angle` (flou directionnel) et aberration chromatique non
   reproduits.
-- Fenêtre visible : seuls les overlays à transformation statique uniforme, sans rotation, avec
-  masque non inversé sont optimisés ; le zoom est rééchantillonné depuis la bbox du masque, d'où
-  un possible déphasage sous-pixel par rapport au scale plein cadre. La piste de base reste en
-  composition dès que `crop_window_fits()` est faux.
+- Fenêtre visible : seuls les overlays à transformation statique uniforme et sans rotation sont
+  optimisés — masque non inversé, ou flou sans masque (marge de 4σ). Le zoom est rééchantillonné
+  depuis la bbox du masque, d'où un possible déphasage sous-pixel par rapport au scale plein
+  cadre. La piste de base reste en composition dès que `crop_window_fits()` est faux.
+- Frame Hold : la frame est figée avant les filtres, mais `HoldFilters=true` (figer aussi les
+  effets animés) n'est pas appliqué ; un avertissement est journalisé.
 - Préparation alpha : seule la **fin** de la plage utilisée est bornée ; un média utilisé
   uniquement tard dans sa source transcode encore tout son préfixe (`-ss` + remap non implémentés
   pour ne pas décaler les horodatages).
