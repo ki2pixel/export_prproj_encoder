@@ -43,6 +43,7 @@ python3 prproj2ffmpeg.py projet.prproj --dump                            # modè
 ### Ce qui est reproduit depuis le XML
 
 - **Piste de base** : chaque item est rendu une seule fois, dans l'ordre de la timeline. Les trous deviennent du noir ; la durée totale est la fin du dernier item.
+- **Générateurs de la piste de base** : Color Matte (`COLR`, couleur RGB lue dans `ImporterPrefs`) et Black Video (`BLAK`) rendus par une source ffmpeg `color` sur la durée de l'item. Les générateurs des pistes V2+ ne sont pas rendus : une ligne `[generator]` le signale et l'export continue.
 - **Transformations (composant `Motion`)** : Position, Échelle, Rotation, Ancre — statiques **ou** animées.
   - **Keyframes linéaires et Bézier** sont toutes deux gérées, détectées clé par clé : l'encodage linéaire (vitesses + influence 1/6) donne une interpolation droite exacte ; l'encodage Bézier (`5,0,…` + poignées) donne la courbe cubique exacte lue depuis le XML. Les intervalles mixtes sont approximés par échantillonnage.
   - La rotation utilise la convention Premiere (positif = horaire) et peut être animée (rendu par composition avec la formule d'ancre exacte).
@@ -71,6 +72,8 @@ python3 prproj2ffmpeg.py projet.prproj --dump                            # modè
   flou gaussien `AE.Impact_Blur_FX`. Les autres effets vidéo, transitions, fondus, mélanges,
   remap de vitesse et texte/graphismes générés par Premiere ne sont pas rendus.
 - Les pistes autres que vidéo/audio standards (nested sequences, ajustements…) ne sont pas rendues.
+- Les générateurs des pistes supérieures (Color Matte / Black Video en overlay) et les calques
+  d'ajustement ne sont pas rendus ; ils sont signalés par une ligne `[generator]`.
 - Après une retouche manuelle dans Premiere, il faut **sauvegarder le projet puis relancer le script** (le XML est relu à chaque exécution).
 
 ### Optimisations automatiques (transparentes)

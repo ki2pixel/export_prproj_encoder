@@ -10,9 +10,9 @@ Copie vendorisée depuis le dépôt de conception de l'auteur (outil maison) :
 
 | Fichier | SHA-256 | État |
 | --- | --- | --- |
-| `prproj2ffmpeg.py` | `612e16563e1ebdd79e273b493e217ec311c3e046c4687f8703ab0b1c8657e0a6` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04) + durcissement sécurité backend (2026-11-05)** (voir ci-dessous) |
+| `prproj2ffmpeg.py` | `9288474d5ebb92789326861dd0cea90cdefa374c16d3dda8cdf71ef3dce25652` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04) + durcissement sécurité backend (2026-11-05) + générateurs Color Matte/Black Video de la piste de base (2026-11-06)** (voir ci-dessous) |
 | `unpack.pl` | `e8aa19fccb148f86160eda3f3da0d5644cc7b435753010e0ef318e269997fbab` | copie conforme |
-| `README.md` | `bf50cdb6bbde672a4df542d39f3c9cd71183827faaf409d59088248eb4f85dfa` | copie **+ documentation des correctifs d'audit (2026-10-23) + Frame Hold et fenêtre floue (2026-11-04)** |
+| `README.md` | `ed85f9b68bf822d5d178ca7899f9ec36c080029aecb3908557845641bcd3951d` | copie **+ documentation des correctifs d'audit (2026-10-23) + Frame Hold et fenêtre floue (2026-11-04) + générateurs de la piste de base (2026-11-06)** |
 | `LICENSE` | `09c65776ef866a5f0c184a5c52331807e954ba74c074b62e3617884ef864ad8b` | copie conforme |
 
 Empreinte de l'original (avant modifications) :
@@ -190,6 +190,31 @@ Empreinte de l'original (avant modifications) :
     - **P-03 temporaires** : suffixe `os.getpid()` sur les fichiers `.tmp.mov`, `.bbox.json.tmp`
       (suffixe conservé pour la purge des orphelins) et les sidecars `.qtrle.json` : un benchmark
       concurrent et le worker n'écrivent plus dans le même fichier temporaire.
+
+17. **Générateurs Color Matte / Black Video de la piste de base (2026-11-06)** — un projet dont
+    V1 est une couleur unie (`Gulli - MSL1 - L’interview « Quand j’étais petit » d’Igor Paixão_9x16_assist`)
+    échouait sur `no video segments found on the base track` : le `<Media>` d'un générateur n'a
+    pas de fichier, seulement un `FilePath` token (`1129270354` = « COLR », `1112293707` =
+    « BLAK »), `VideoStream/IsStill=true` et la couleur RGB dans `ImporterPrefs` (base64 de
+    8 octets `[R,G,B,0,1,0,0,0]`), si bien que la sélection de la piste de base l'éliminait.
+    - `_index_media()` / `Clip` : détection des tokens, de l'`ImplementationID` générateur et du
+      `Title` ; décodage de la couleur via `decode_importer_color()` ; `path` forcé à `None`.
+    - `is_base_item()` : média fichier non-still **ou** générateur ; les générateurs V1 sont
+      désormais des items de base, rendus par une source ffmpeg
+      `color=c=0xRRGGBB:s=…:r=…:d=…` (`color_source_filter()`), sur la durée timeline de l'item.
+    - `group_runs()` : un générateur ne passe jamais par `get_pull()` et n'est pas regroupé par
+      chemin ; `collect_overlay_layers()` l'exclut des overlays, et
+      `unsupported_overlay_generators()` signale les générateurs V2+ (`[generator] … ignoré`).
+    - `--dump` est construit avant les validations d'export : il fonctionne même sans base ni
+      média résoluble, et expose `generator` / `color` par segment.
+
+**Validation 2026-11-06 (générateurs de la piste de base)** : projet réel
+`Gulli - MSL1 - L’interview « Quand j’étais petit » d’Igor Paixão_9x16_assist` — `--dump` OK
+(séquence 1080×1920 à 25 fps, durée 79,2 s, un segment `generator: "color"`,
+`color: [0, 122, 255]`, `source.path: null`), `--dry-run` avec
+`color=c=0x007aff:s=1080x1920:r=25.000000:d=79.200000,setsar=1,format=yuv420p[gen0]` et
+`concat=n=1` ; petit projet Color Matte seul exporté en 1 s, pixel de contrôle
+`(0,120,255)` (écart de 2 dû à la conversion yuv420p/H.264). Suite `unittest` **105/105**.
 
 **Validation** : W9 `mask_blur` (masque sur le 3ᵉ clip + flou sur le 4ᵉ) conforme aux captures
 Premiere ; Mabille : 3 masques sur la piste V2, split screens cadrés et synchronisés (apparition à

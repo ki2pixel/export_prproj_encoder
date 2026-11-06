@@ -27,6 +27,14 @@ import xml.etree.ElementTree as ET
 import zlib
 
 TICKS = 254016000000
+# Générateurs natifs Premiere : Media sans fichier, FilePath = token décimal de COLR/BLAK.
+GENERATOR_IMPLEMENTATION_ID = '42008e7a-de6f-4270-96de-7e287abb9b4b'
+GENERATOR_TOKENS = {
+    '1129270354': 'color',   # « COLR »
+    '1112293707': 'black',   # « BLAK »
+    'COLR': 'color',
+    'BLAK': 'black',
+}
 CACHE_ROOT = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'),
                           'prproj2ffmpeg')
 # Plafond de sécurité contre les bombes gzip : au-delà, le DOM ElementTree ferait OOM.
@@ -69,6 +77,20 @@ def to_sec(ticks_str, default=0.0):
         return int(ticks_str) / TICKS
     except (TypeError, ValueError):
         return default
+
+
+def decode_importer_color(raw):
+    """Couleur RGB d'un Color Matte : ImporterPrefs base64 [R,G,B,0,1,0,0,0]."""
+    raw = (raw or '').strip()
+    if not raw:
+        return None
+    try:
+        data = base64.b64decode(raw)
+    except Exception:
+        return None
+    if len(data) < 3:
+        return None
+    return data[0], data[1], data[2]
 
 
 def first_num(value_str):
@@ -282,6 +304,9 @@ class Clip:
         self.source_w = None
         self.source_h = None
         self.still = False
+        # Générateur Premiere (Color Matte / Black Video) : pas de fichier source.
+        self.generator = None   # None | 'color' | 'black'
+        self.color = None       # (r, g, b) pour un Color Matte, (0, 0, 0) pour BLAK
         self.in_sec = 0.0
         self.out_sec = 0.0
         self.name = ''
@@ -374,9 +399,34 @@ class Project:
                     sr = self.by_id.get(s.get('ObjectRef'))
                     if sr is not None:
                         streams.append(sr)
+            path = text(el, 'FilePath')
+            title = (text(el, 'Title') or '').strip()
+            implementation = (text(el, 'ImplementationID') or '').strip()
+            prefs = text(el, 'ImporterPrefs')
+            token = (path or '').strip()
+
+            generator = GENERATOR_TOKENS.get(token)
+            if generator is None and implementation == GENERATOR_IMPLEMENTATION_ID:
+                generator = 'black' if 'black' in title.lower() else 'color'
+            if generator is None and title.lower() in ('color matte', 'black video'):
+                generator = 'black' if title.lower() == 'black video' else 'color'
+            if generator is None and not path and prefs:
+                # Générateur Adobe sans FilePath : la couleur est dans ImporterPrefs.
+                candidate = decode_importer_color(prefs)
+                if candidate is not None:
+                    generator, color = 'color', candidate
+            if generator == 'color':
+                color = decode_importer_color(prefs) or (0, 0, 0)
+            elif generator == 'black':
+                color = (0, 0, 0)
+            else:
+                color = None
+
             info = {
-                'path': text(el, 'FilePath'),
+                'path': None if generator is not None else path,
                 'still': any(text(s, 'IsStill') == 'true' for s in streams),
+                'generator': generator,
+                'color': color,
                 'w': None,
                 'h': None,
             }
@@ -472,6 +522,8 @@ class Project:
             clip.source_w = media.get('w')
             clip.source_h = media.get('h')
             clip.still = media.get('still', False)
+            clip.generator = media.get('generator')
+            clip.color = media.get('color')
         clip.name = text(subclip, 'Name', '')
         return clip
 
@@ -652,19 +704,41 @@ def resolve_media(win_path, bases):
     return None
 
 
+def is_base_item(item):
+    """Média fichier non-still OU générateur : item rendu sur la piste de base."""
+    if item.clip is None:
+        return False
+    if item.clip.generator is not None:
+        return True
+    return bool(item.clip.source_path) and not item.clip.still
+
+
 def collect_overlay_layers(parsed, video_tracks, base_track_items):
     """Couches d'incrustation dans l'ordre d'empilement Premiere (V1 still, V2, V3...).
 
     La couche 0 contient les images fixes de la piste de base ; chaque piste suivante
-    forme une couche. Les items sans source sont ignores. L'ordre final des couches est
-    l'ordre vertical : les derniers composites passent au-dessus.
+    forme une couche. Les items sans source sont ignores, ainsi que les generateurs
+    (rendus par la piste de base). L'ordre final des couches est l'ordre vertical : les
+    derniers composites passent au-dessus.
     """
     layers = [[it for it in base_track_items
-               if it.clip is not None and it.clip.source_path and it.clip.still]]
+               if it.clip is not None and it.clip.generator is None
+               and it.clip.source_path and it.clip.still]]
     for track in video_tracks[1:]:
         layers.append([it for it in parsed.items_of_track(track)
-                       if it.clip is not None and it.clip.source_path])
+                       if it.clip is not None and it.clip.generator is None
+                       and it.clip.source_path])
     return layers
+
+
+def unsupported_overlay_generators(parsed, video_tracks):
+    """Générateurs des pistes V2+ : non rendus (seule la piste de base l'est)."""
+    found = []
+    for track in video_tracks[1:]:
+        for item in parsed.items_of_track(track):
+            if item.clip is not None and item.clip.generator is not None:
+                found.append(item)
+    return found
 
 
 def collect_audio_tracks(parsed, audio_track_elements):
@@ -977,6 +1051,14 @@ def hold_frame_filter(dur, start_pts=0.0):
             f"tpad=stop_mode=clone:stop_duration={dur:.6f},"
             f"trim=duration={dur:.6f},"
             f"setpts=PTS-STARTPTS+{start_pts:.6f}/TB")
+
+
+def color_source_filter(color, width, height, fps, duration, label):
+    """Source ffmpeg couleur pleine cadre pour un générateur de la piste de base."""
+    r, g, b = color or (0, 0, 0)
+    return (f"color=c=0x{int(r):02x}{int(g):02x}{int(b):02x}:"
+            f"s={int(width)}x{int(height)}:r={fps:.6f}:d={duration:.6f},"
+            f"setsar=1,format=yuv420p[{label}]")
 
 
 def item_trim(item, cin, cout, run_in):
@@ -2184,21 +2266,19 @@ def main():
     if not video_tracks:
         die('sequence has no video track')
     v1_items = parsed.items_of_track(video_tracks[0])
-    base = [i for i in v1_items
-            if i.clip is not None and i.clip.source_path and not i.clip.still]
+    base = [i for i in v1_items if is_base_item(i)]
     # L'ordre des couches est l'ordre vertical Premiere (V1 still, V2, V3...) ; il
     # n'est jamais retrie : les derniers composites passent au-dessus.
     layers = collect_overlay_layers(parsed, video_tracks, v1_items)
     overlays = [it for layer in layers for it in layer]
-    if not base:
-        die('no video segments found on the base track')
+    for item in unsupported_overlay_generators(parsed, video_tracks):
+        label = 'Color Matte' if item.clip.generator == 'color' else 'Black Video'
+        print(f"[generator] {label} '{item.clip.name}' sur une piste supérieure ignoré "
+              "(seule la piste de base est prise en charge)", file=sys.stderr, flush=True)
 
     xml_dir = os.path.dirname(src)
     bases = args.base + [xml_dir, os.path.dirname(xml_dir),
                          os.path.dirname(os.path.dirname(xml_dir)), os.getcwd()]
-    src_path_main = resolve_media(base[0].clip.source_path, bases)
-    if not src_path_main:
-        die(f"media not found for {base[0].clip.source_path} (use --base)")
 
     seq_w, seq_h = 1080.0, 1920.0
     fps = 25.0
@@ -2216,9 +2296,16 @@ def main():
                     fps = TICKS / float(frate)
                 break
 
-    src_w, src_h = base[0].clip.source_w, base[0].clip.source_h
-    if not src_w or not src_h:
-        die('source media dimensions missing in XML')
+    first_media = next((i for i in base
+                        if i.clip.generator is None and i.clip.source_path), None)
+    src_path_main = (resolve_media(first_media.clip.source_path, bases)
+                     if first_media is not None else None)
+    src_w = src_h = None
+    if base:
+        src_w, src_h = base[0].clip.source_w, base[0].clip.source_h
+        if base[0].clip.generator is not None:
+            src_w = src_w or seq_w
+            src_h = src_h or seq_h
 
     # Frame Hold : borner chaque FrameHoldStart à la durée réelle du média une seule
     # fois, avant le dump et la construction du graphe (le dump montre la valeur finale).
@@ -2240,6 +2327,9 @@ def main():
                 {
                     'start': i.start, 'end': i.end,
                     'in': i.clip.in_sec, 'out': i.clip.out_sec,
+                    'path': i.clip.source_path,
+                    'generator': i.clip.generator,
+                    'color': list(i.clip.color) if i.clip.color else None,
                     'hold': i.clip.hold_sec,
                     'hold_filters': i.clip.hold_filters,
                     'scale': i.scale_w / 100.0,
@@ -2291,6 +2381,13 @@ def main():
         print(json.dumps(model, indent=2))
         return
 
+    if not base:
+        die('no video segments found on the base track')
+    if first_media is not None and not src_path_main:
+        die(f"media not found for {first_media.clip.source_path} (use --base)")
+    if not src_w or not src_h:
+        die('source media dimensions missing in XML')
+
     # Plage source réellement utilisée par média : l'intermédiaire alpha et l'analyse
     # bbox ne couvrent que le préfixe [0, fin utilisé], jamais les rushes non montés.
     # On conserve le préfixe (pas de -ss) pour ne décaler aucun horodatage.
@@ -2306,6 +2403,8 @@ def main():
         print(f"[hold] HoldFilters=true ignoré pour '{item.clip.name}' : "
               "les effets animés ne sont pas figés", flush=True)
     for item in base:
+        if item.clip.generator is not None:
+            continue
         cin, cdur = clip_times(item)
         hold = safe_hold_sec(item, bases, fps)
         _note_alpha_end(item.clip.source_path,
@@ -2348,6 +2447,12 @@ def main():
         """
         runs = []
         for item in items:
+            if item.clip is not None and item.clip.generator is not None:
+                # Générateur : pas de fichier à décoder, durée purement timeline.
+                dur = max(0.0, item.end - item.start)
+                runs.append({'kind': 'color', 'path': None, 'color': item.clip.color,
+                             'in': 0.0, 'out': dur, 'items': [(item, 0.0, dur)]})
+                continue
             cin, cdur = clip_times(item)
             cout = cin + cdur
             if item.clip is not None and item.clip.hold_sec is not None:
@@ -2372,7 +2477,8 @@ def main():
     cursor = 0.0
     n = 0
     for r, run in enumerate(group_runs(base)):
-        p = get_pull(run['path'], run['in'], run['out'], alpha_ok=True)
+        is_color = run.get('kind') == 'color'
+        p = None if is_color else get_pull(run['path'], run['in'], run['out'], alpha_ok=True)
         k = len(run['items'])
         if k > 1:
             outs = ''.join(f"[vr{r}_{j}]" for j in range(k))
@@ -2383,20 +2489,31 @@ def main():
                 filters.append(f"color=c=black:s={int(seq_w)}x{int(seq_h)}:r={fps:.6f}:d={gap:.6f},"
                                f"setsar=1,format=yuv420p[vg{n}]")
                 video_labels.append(f"[vg{n}]")
-            src_label = f"[vr{r}_{j}]" if k > 1 else f"[{p}:v]"
-            trim = item_trim(item, cin, cout, run['in'])
-            if item.clip.hold_sec is not None:
-                print(f"[hold] '{item.clip.name}' figé sur {item.clip.hold_sec:.3f} s "
-                      f"({item.end - item.start:.3f} s)", flush=True)
             isw = item.clip.source_w or src_w
             ish = item.clip.source_h or src_h
+            if is_color:
+                src_label = f"[gen{n}]"
+                # « null » évite un lien de labels vide dans le chemin composition.
+                trim = 'null'
+                filters.append(color_source_filter(item.clip.color, isw, ish, fps,
+                                                   cout - cin, f"gen{n}"))
+            else:
+                src_label = f"[vr{r}_{j}]" if k > 1 else f"[{p}:v]"
+                trim = item_trim(item, cin, cout, run['in'])
+                if item.clip.hold_sec is not None:
+                    print(f"[hold] '{item.clip.name}' figé sur {item.clip.hold_sec:.3f} s "
+                          f"({item.end - item.start:.3f} s)", flush=True)
             # Le chemin « fenêtre de crop » ne peut pas rendre fidèlement un item dont la
             # fenêtre ne tient pas dans la source, dont le cadrage demandé sort des limites
             # (position bornée), ni un item masqué (transparence requise) : dans ces cas,
             # l'item passe par la composition (fond + overlay).
             if item_needs_canvas(item) or item.masks or not crop_window_fits(item, seq_w, seq_h, isw, ish):
-                media_path = alpha_intermediate(resolve_media(item.clip.source_path, bases) or '')
-                bbox_part, bdx, bdy = bbox_crop_part(item, media_path, isw, ish)
+                if item.clip.generator is not None:
+                    media_path = ''
+                    bbox_part, bdx, bdy = None, 0, 0
+                else:
+                    media_path = alpha_intermediate(resolve_media(item.clip.source_path, bases) or '')
+                    bbox_part, bdx, bdy = bbox_crop_part(item, media_path, isw, ish)
                 tf = transform_filters(item, isw, ish, item.start, item.end)
                 pending = []
                 if tf:

@@ -5,8 +5,8 @@
 `967affb14a5f6028b651814628ec99da3b91c7625b00208d5075339983a6c2b0`) est introuvable depuis le
 2026-10-13. C'est ce fichier que l'application exécute (`PRPROJ2FFMPEG_SCRIPT`).
 
-Empreinte actuelle de la copie de référence (2026-11-05, durcissement sécurité inclus) :
-`612e16563e1ebdd79e273b493e217ec311c3e046c4687f8703ab0b1c8657e0a6`.
+Empreinte actuelle de la copie de référence (2026-11-06, générateurs de la piste de base inclus) :
+`9288474d5ebb92789326861dd0cea90cdefa374c16d3dda8cdf71ef3dce25652`.
 
 ## Procédure de synchronisation (quand la source sera retrouvée)
 
@@ -125,9 +125,24 @@ Empreinte actuelle de la copie de référence (2026-11-05, durcissement sécurit
     - les fichiers temporaires du cache alpha (`.tmp.mov`, `.bbox.json.tmp`, sidecar
       `.qtrle.json.<pid>.tmp`) incluent le PID pour éviter toute collision entre un benchmark et
       le worker. Le suffixe `.bbox.json.tmp` est conservé pour la purge des orphelins.
+17. **Générateurs Color Matte / Black Video de la piste de base (2026-11-06)** :
+    - `_index_media()` détecte un générateur par le token `FilePath` (`1129270354` = COLR,
+      `1112293707` = BLAK), par l'`ImplementationID` générateur ou par le `Title` ; la couleur
+      RGB d'un Color Matte est décodée depuis `ImporterPrefs` (base64 `[R,G,B,0,1,0,0,0]`).
+    - `Clip.generator` / `Clip.color` propagent l'information ; `is_base_item()` accepte les
+      générateurs sur V1, et `group_runs()` les rend par une source ffmpeg
+      `color=c=0xRRGGBB:…` sur la durée timeline de l'item (`color_source_filter()`), sans
+      passer par `get_pull()`.
+    - `collect_overlay_layers()` exclut les générateurs des overlays (pas de double rendu) ;
+      `unsupported_overlay_generators()` signale ceux des pistes V2+ (`[generator]`) et l'export
+      continue sans les rendre.
+    - `--dump` est construit avant les validations d'export (fonctionne sans base ni média
+      résoluble) et expose `generator` / `color` par segment.
 
 ## Limites connues de la copie actuelle
 
+- Générateurs (Color Matte / Black Video) : seuls ceux de la piste de base V1 sont rendus ; ceux
+  des pistes V2+ et les calques d'ajustement sont signalés `[generator]` et ignorés.
 - Masques : seuls les types rectangle (`Type=2`) et ellipse sont rendus ; les formes libres et les
   chemins animés sont ignorés (rendu sans masque). Blend modes : union (Add) ; l'inversion est gérée.
 - Flou : rendu isotrope (`gblur`) ; `Thickness`/`Angle` (flou directionnel) et l'aberration

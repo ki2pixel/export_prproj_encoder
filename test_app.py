@@ -461,6 +461,10 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.assertIn("ERREUR", summarize_line("error: ffmpeg failed with exit code 1"))
         self.assertIn("média introuvable", summarize_line("error: media not found for F:\\Rushes\\clip.mp4 (use --base)"))
         self.assertIn("ERREUR: prproj2ffmpeg", summarize_line("error: no sequence found in project"))
+        self.assertIn("aucun média vidéo exploitable", summarize_line(
+            "error: no video segments found on the base track"))
+        self.assertIn("prproj2ffmpeg: [generator]", summarize_line(
+            "[generator] Color Matte 'Solid 1' sur une piste supérieure ignoré"))
         self.assertIn("cache", summarize_line("[cache] 8-bit alpha intermediate for 'logo.mov'"))
         self.assertIn("conversion alpha", summarize_line("[cache] conversion alpha 8 bits de 'logo.mov' (0-61.5 s)…"))
         self.assertIn("recadrage alpha", summarize_line("[bbox] recadrage alpha de 'm6+.png': 172x90+824+292"))
@@ -1618,6 +1622,163 @@ class TestAMEWatchfolder(unittest.TestCase):
 
         layers = engine.collect_overlay_layers(parsed, tracks, [v1_still, v1_video])
         self.assertEqual(layers, [[v1_still], [v2_item], [v3_item]])
+
+    # --- Générateurs Color Matte / Black Video (piste de base) ---
+
+    @staticmethod
+    def _generator_project_xml(file_path="1129270354", title="Solid 1",
+                               prefs="AHr/AAEAAAA=", implementation=True,
+                               with_file_path=True,
+                               duration_ticks=2540160000000):
+        file_path_xml = f"<FilePath>{file_path}</FilePath>" if with_file_path else ""
+        prefs_xml = (f'<ImporterPrefs Encoding="base64" BinaryHash="test">{prefs}</ImporterPrefs>'
+                     if prefs else "")
+        implementation_xml = (
+            "<ImplementationID>42008e7a-de6f-4270-96de-7e287abb9b4b</ImplementationID>"
+            if implementation else "")
+        return f"""<?xml version="1.0" encoding="UTF-8" ?>
+<PremiereData Version="3">
+  <Sequence ObjectID="1">
+    <Name>Seq</Name>
+    <TrackGroups>
+      <TrackGroup><Second ObjectRef="2"/></TrackGroup>
+    </TrackGroups>
+  </Sequence>
+  <VideoTrackGroup ObjectID="2">
+    <FrameRect>0,0,1080,1920</FrameRect>
+    <FrameRate>10160640000</FrameRate>
+    <TrackGroup>
+      <Tracks><Track ObjectURef="3"/></Tracks>
+    </TrackGroup>
+  </VideoTrackGroup>
+  <VideoTrack ObjectUID="3">
+    <ClipTrack>
+      <ClipItems>
+        <TrackItems><TrackItem ObjectRef="4"/></TrackItems>
+      </ClipItems>
+    </ClipTrack>
+  </VideoTrack>
+  <TrackItem ObjectID="4">
+    <ClipTrackItem>
+      <TrackItem><Start>0</Start><End>{duration_ticks}</End></TrackItem>
+      <SubClip ObjectRef="5"/>
+    </ClipTrackItem>
+  </TrackItem>
+  <SubClip ObjectID="5">
+    <Clip ObjectRef="6"/>
+    <Name>{title}</Name>
+  </SubClip>
+  <VideoClip ObjectID="6">
+    <Clip Version="18">
+      <Source ObjectRef="7"/>
+      <InPoint>0</InPoint>
+      <OutPoint>0</OutPoint>
+    </Clip>
+  </VideoClip>
+  <MediaSource ObjectID="7"><Media ObjectURef="8"/></MediaSource>
+  <Media ObjectUID="8">
+    {file_path_xml}
+    <VideoStream ObjectRef="9"/>
+    {prefs_xml}
+    {implementation_xml}
+    <Title>{title}</Title>
+  </Media>
+  <VideoStream ObjectID="9">
+    <IsStill>true</IsStill>
+    <FrameRect>0,0,1080,1920</FrameRect>
+  </VideoStream>
+</PremiereData>
+"""
+
+    def test_generateur_color_matte_parse(self):
+        engine = load_prproj2ffmpeg()
+        parsed = engine.Project('memoire.xml',
+                                xml_bytes=self._generator_project_xml().encode())
+        clip = parsed._clip_of(parsed.by_id['5'])
+        self.assertEqual(clip.generator, 'color')
+        self.assertEqual(clip.color, (0, 122, 255))
+        self.assertIsNone(clip.source_path)
+        self.assertTrue(clip.still)
+        self.assertEqual(clip.source_w, 1080.0)
+        self.assertEqual(clip.source_h, 1920.0)
+
+    def test_generateur_black_video_parse(self):
+        engine = load_prproj2ffmpeg()
+        xml = self._generator_project_xml(
+            file_path="1112293707", title="Black Video", prefs=None)
+        parsed = engine.Project('memoire.xml', xml_bytes=xml.encode())
+        clip = parsed._clip_of(parsed.by_id['5'])
+        self.assertEqual(clip.generator, 'black')
+        self.assertEqual(clip.color, (0, 0, 0))
+        self.assertIsNone(clip.source_path)
+
+    def test_generateur_sans_filepath_importer_prefs(self):
+        engine = load_prproj2ffmpeg()
+        xml = self._generator_project_xml(
+            file_path=None, title="Custom Solid", prefs="AHr/AAEAAAA=",
+            implementation=False, with_file_path=False)
+        parsed = engine.Project('memoire.xml', xml_bytes=xml.encode())
+        clip = parsed._clip_of(parsed.by_id['5'])
+        self.assertEqual(clip.generator, 'color')
+        self.assertEqual(clip.color, (0, 122, 255))
+        self.assertIsNone(clip.source_path)
+
+    def test_generateur_base_et_overlays(self):
+        engine = load_prproj2ffmpeg()
+        v1_gen = self._clip_item(engine, 0.0, 10.0, path=None, still=True)
+        v1_gen.clip.generator = 'color'
+        v1_gen.clip.color = (0, 122, 255)
+        v1_video = self._clip_item(engine, 0.0, 10.0, path="base.mp4")
+        v1_still = self._clip_item(engine, 0.0, 10.0, path="still.png", still=True)
+        v2_gen = self._clip_item(engine, 0.0, 10.0, path=None, still=True)
+        v2_gen.clip.generator = 'color'
+        v2_gen.clip.color = (0, 122, 255)
+        v2_item = self._clip_item(engine, 0.0, 10.0, path="v2.png")
+        tracks = ["V1", "V2"]
+        mapping = {"V1": [v1_gen, v1_video, v1_still], "V2": [v2_gen, v2_item]}
+        parsed = types.SimpleNamespace(items_of_track=lambda track: mapping[track])
+
+        self.assertTrue(engine.is_base_item(v1_gen))
+        self.assertTrue(engine.is_base_item(v1_video))
+        self.assertFalse(engine.is_base_item(v1_still))
+        self.assertEqual(engine.collect_overlay_layers(parsed, tracks, mapping["V1"]),
+                         [[v1_still], [v2_item]])
+        self.assertEqual(engine.unsupported_overlay_generators(parsed, tracks), [v2_gen])
+
+    def test_color_source_filter(self):
+        engine = load_prproj2ffmpeg()
+        self.assertEqual(
+            engine.color_source_filter((0, 122, 255), 1080, 1920, 25.0, 10.0, 'gen0'),
+            'color=c=0x007aff:s=1080x1920:r=25.000000:d=10.000000,'
+            'setsar=1,format=yuv420p[gen0]')
+        self.assertEqual(
+            engine.color_source_filter(None, 1080, 1920, 25.0, 1.5, 'gen1'),
+            'color=c=0x000000:s=1080x1920:r=25.000000:d=1.500000,'
+            'setsar=1,format=yuv420p[gen1]')
+
+    def test_decode_importer_color(self):
+        engine = load_prproj2ffmpeg()
+        self.assertEqual(engine.decode_importer_color('AHr/AAEAAAA='), (0, 122, 255))
+        self.assertIsNone(engine.decode_importer_color(None))
+        self.assertIsNone(engine.decode_importer_color(''))
+        self.assertIsNone(engine.decode_importer_color('AA=='))
+        self.assertIsNone(engine.decode_importer_color('***'))
+
+    def test_dump_generateur_sans_media(self):
+        xml_path = self.base_folder / "generateur.xml"
+        xml_path.write_text(self._generator_project_xml(), encoding='utf-8')
+        completed = subprocess.run(
+            [sys.executable, str(PRPROJ2FFMPEG_SCRIPT), str(xml_path), '--dump'],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        model = json.loads(completed.stdout)
+        self.assertEqual(model['sequence'], 'Seq')
+        self.assertEqual(model['sequence_size'], [1080.0, 1920.0])
+        self.assertEqual(model['fps'], 25.0)
+        self.assertEqual(model['duration'], 10.0)
+        self.assertIsNone(model['source']['path'])
+        self.assertEqual(model['segments'][0]['generator'], 'color')
+        self.assertEqual(model['segments'][0]['color'], [0, 122, 255])
 
     def test_collect_audio_tracks(self):
         engine = load_prproj2ffmpeg()

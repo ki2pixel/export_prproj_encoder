@@ -303,7 +303,7 @@ def read_project_info(prproj_path: Path, script_path: Path, media_bases=(),
     Lit les métadonnées du projet (nom de séquence, durée, cadence, taille) via `--dump`.
 
     Best effort : retourne None si le dump échoue (nommage et encodage n'en dépendent pas ;
-    le dump exige lui aussi que le média principal soit résoluble).
+    le dump est construit avant les validations d'export et tolère l'absence de média).
     """
     if script_path is None:
         return None
@@ -608,10 +608,13 @@ def summarize_line(raw_line: str) -> str | None:
                     "(ajoutez la racine des médias à PRPROJ2FFMPEG_EXTRA_BASES)")
         if detail.startswith('ffmpeg failed'):
             return f"ERREUR: ffmpeg a échoué — {detail} (voir le journal complet du job)"
+        if detail.startswith('no video segments found'):
+            return ("ERREUR: aucun média vidéo exploitable sur la piste de base (V1) — "
+                    "la séquence ne contient que des images fixes ou des éléments non rendus")
         return f"ERREUR: prproj2ffmpeg — {detail}"
     if text.startswith('done:'):
         return f"✓ Export terminé : {text[len('done:'):].strip()}"
-    if text.startswith(('[cache]', '[bbox]', '[encoder]', '[hold]')):
+    if text.startswith(('[cache]', '[bbox]', '[encoder]', '[hold]', '[generator]')):
         return f"prproj2ffmpeg: {text}"
     # Ligne de commande générée par le script (elle commence toujours par « ffmpeg -… ») ;
     # la bannière « ffmpeg version … » reste au journal.

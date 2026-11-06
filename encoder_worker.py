@@ -569,6 +569,7 @@ def _process_job(prproj_path: Path, job_id: str, row: dict, settings: EncodeSett
     # Échec
     _discard_staging()
     detail = result.error_lines[0] if result.error_lines else f"code retour {result.returncode}"
+    detail = summarize_line(detail) or detail
     log_encoder_message(f"Job {job_id} EN ÉCHEC après {result.duration_seconds:.1f} s — {detail}")
     log_encoder_message(f"  Journal complet : '{export_log_path}'")
     log_encoder_message("  Le projet n'a pas été encodé : relancer la soumission (option « Forcer l'écrasement ») pour réessayer.")

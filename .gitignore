@@ -39,3 +39,6 @@ encoder_log_backup.txt
 *~
 .DS_Store
 
+# debug
+debug/
+
