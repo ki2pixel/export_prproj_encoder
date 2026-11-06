@@ -5,8 +5,8 @@
 `967affb14a5f6028b651814628ec99da3b91c7625b00208d5075339983a6c2b0`) est introuvable depuis le
 2026-10-13. C'est ce fichier que l'application exécute (`PRPROJ2FFMPEG_SCRIPT`).
 
-Empreinte actuelle de la copie de référence (2026-11-06, générateurs de la piste de base inclus) :
-`9288474d5ebb92789326861dd0cea90cdefa374c16d3dda8cdf71ef3dce25652`.
+Empreinte actuelle de la copie de référence (2026-11-06, générateurs et fenêtres demi-ouvertes
+inclus) : `6a370afcf6a3887c982e392b2753506f03a77d37e05c23bee468aa17f99b05bc`.
 
 ## Procédure de synchronisation (quand la source sera retrouvée)
 
@@ -138,6 +138,13 @@ Empreinte actuelle de la copie de référence (2026-11-06, générateurs de la p
       continue sans les rendre.
     - `--dump` est construit avant les validations d'export (fonctionne sans base ni média
       résoluble) et expose `generator` / `color` par segment.
+18. **Fenêtre d'activation des overlays demi-ouverte (2026-11-06)** :
+    - `overlay_enable_expr(start, end, total, fps)` remplace le `between(t, start - shift,
+      span_end)` : la borne haute est avancée de la même demi-image que le flux secondaire,
+      ce qui rend la fenêtre demi-ouverte sur la grille des frames.
+    - Sans ce correctif, à chaque cut contigu (`sortant.end == entrant.start == T`), le
+      sortant restait composité sur la frame `T` et apparaissait autour du masque de
+      l'entrant. L'overlay plein cadre reste sans `enable`.
 
 ## Limites connues de la copie actuelle
 

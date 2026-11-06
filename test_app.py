@@ -1349,6 +1349,23 @@ class TestAMEWatchfolder(unittest.TestCase):
         self.assertIn('setpts=PTS-STARTPTS+471.940000/TB', chain)
         self.assertIn('trim=duration=10.960000', chain)
 
+    def test_overlay_enable_expr_cut_frame(self):
+        """La borne haute est demi-ouverte : l'overlay sortant ne déborde pas sur le cut."""
+        engine = load_prproj2ffmpeg()
+        # Cut contigu à 10.72 s : la frame 10.72 appartient au segment entrant.
+        self.assertEqual(
+            engine.overlay_enable_expr(8.44, 10.72, 79.2, 25.0),
+            ":enable='between(t,8.420000,10.700000)'")
+        self.assertEqual(
+            engine.overlay_enable_expr(10.72, 12.48, 79.2, 25.0),
+            ":enable='between(t,10.700000,12.460000)'")
+        # Cut non contigu 3.68 -> 3.72 : le sortant laisse une frame de fond à 3.68.
+        self.assertEqual(
+            engine.overlay_enable_expr(0.0, 3.68, 79.2, 25.0),
+            ":enable='between(t,0.000000,3.660000)'")
+        # Overlay plein cadre : aucune fenêtre d'activation.
+        self.assertEqual(engine.overlay_enable_expr(0.0, 79.2, 79.2, 25.0), '')
+
     def test_pull_table_collisions(self):
         engine = load_prproj2ffmpeg()
 

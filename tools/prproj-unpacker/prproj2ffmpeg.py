@@ -997,6 +997,20 @@ def overlay_xy_exprs(item, src_w, src_h, seq_w, seq_h, start, end):
     return x, y
 
 
+def overlay_enable_expr(start, end, total, fps):
+    """Fenêtre d'activation demi-ouverte [start, end) d'un overlay.
+
+    Le flux secondaire est avancé d'une demi-image pour compenser framesync ; la borne
+    haute est avancée de la même demi-image pour que l'overlay sortant ne reste pas
+    actif sur la frame du cut (between() est inclusif aux deux bornes).
+    """
+    shift = 0.5 / fps
+    if start <= 1e-6 and abs(end - total) <= 1e-6:
+        return ''
+    return (f":enable='between(t,{max(0.0, start - shift):.6f},"
+            f"{max(0.0, end - shift):.6f})'")
+
+
 def poly_expr(coeffs):
     d0, d1, d2, d3 = coeffs
     if d1 == 0.0 and d2 == 0.0 and d3 == 0.0:
@@ -2693,9 +2707,7 @@ def main():
             if bdx or bdy:
                 ox = f"({ox}+{bdx})"
                 oy = f"({oy}+{bdy})"
-        enable = ''
-        if ov.start > 1e-6 or abs(span_end - total) > 1e-6:
-            enable = f":enable='between(t,{max(0.0, ov.start - shift):.6f},{span_end:.6f})'"
+        enable = overlay_enable_expr(ov.start, span_end, total, fps)
         filters.append(f"{last}[ov{k}]overlay=x='{ox}':y='{oy}'{enable}[mix{k}]")
         last = f'[mix{k}]'
 

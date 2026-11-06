@@ -10,9 +10,9 @@ Copie vendorisée depuis le dépôt de conception de l'auteur (outil maison) :
 
 | Fichier | SHA-256 | État |
 | --- | --- | --- |
-| `prproj2ffmpeg.py` | `9288474d5ebb92789326861dd0cea90cdefa374c16d3dda8cdf71ef3dce25652` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04) + durcissement sécurité backend (2026-11-05) + générateurs Color Matte/Black Video de la piste de base (2026-11-06)** (voir ci-dessous) |
+| `prproj2ffmpeg.py` | `6a370afcf6a3887c982e392b2753506f03a77d37e05c23bee468aa17f99b05bc` | copie **+ correctifs + rendu masques/blur + optimisations perf Niv 1 & 2 + boîte alpha exacte des images fixes + préparation alpha bornée & cache (2026-10-19) + rendu fenêtre visible des overlays masqués (2026-10-23) + index de cache alpha inter-séquences (2026-10-23) + correctifs d'audit 1.1–3.4 (2026-10-23) + Frame Hold natif & fenêtre visible des overlays flous (2026-11-04) + durcissement sécurité backend (2026-11-05) + générateurs Color Matte/Black Video de la piste de base (2026-11-06) + fenêtre d'activation demi-ouverte des overlays (2026-11-06)** (voir ci-dessous) |
 | `unpack.pl` | `e8aa19fccb148f86160eda3f3da0d5644cc7b435753010e0ef318e269997fbab` | copie conforme |
-| `README.md` | `ed85f9b68bf822d5d178ca7899f9ec36c080029aecb3908557845641bcd3951d` | copie **+ documentation des correctifs d'audit (2026-10-23) + Frame Hold et fenêtre floue (2026-11-04) + générateurs de la piste de base (2026-11-06)** |
+| `README.md` | `ec73e238f21a3a0838034b2153c702949223f8355581e9aab15de194c019abba` | copie **+ documentation des correctifs d'audit (2026-10-23) + Frame Hold et fenêtre floue (2026-11-04) + générateurs de la piste de base et fenêtres demi-ouvertes (2026-11-06)** |
 | `LICENSE` | `09c65776ef866a5f0c184a5c52331807e954ba74c074b62e3617884ef864ad8b` | copie conforme |
 
 Empreinte de l'original (avant modifications) :
@@ -215,6 +215,29 @@ Empreinte de l'original (avant modifications) :
 `color=c=0x007aff:s=1080x1920:r=25.000000:d=79.200000,setsar=1,format=yuv420p[gen0]` et
 `concat=n=1` ; petit projet Color Matte seul exporté en 1 s, pixel de contrôle
 `(0,120,255)` (écart de 2 dû à la conversion yuv420p/H.264). Suite `unittest` **105/105**.
+
+18. **Fenêtre d'activation des overlays demi-ouverte (2026-11-06)** — sur le même projet,
+    une frame de chevauchement apparaissait à chaque cut contigu entre segments masqués :
+    l'overlay sortant restait actif sur la frame du cut, visible autour du masque de
+    l'overlay entrant. Cause : `enable='between(t, start - shift, span_end)'`, `between()`
+    étant **inclusif aux deux bornes** ; pour un cut contigu (`sortant.end == entrant.start
+    == T`), le sortant était encore actif à `t = T` et l'entrant l'était dès `T - 0.5/fps`.
+    - `overlay_enable_expr(start, end, total, fps)` centralise la fenêtre en `[start - shift,
+      end - shift]` (demi-ouverte sur la grille des frames) ; l'overlay plein cadre reste sans
+      `enable`.
+    - `--dry-run` du projet Gulli : `[0, 3.66]`, `[3.70, 8.42]`, `[8.42, 10.70]`, … — plus de
+      recouvrement au cut ; le cut non contigu `3.68 → 3.72` laisse bien une frame de fond.
+
+**Validation 2026-11-06 (fenêtre d'activation demi-ouverte)** : suite `unittest` **106/106**.
+Ré-export du projet Gulli (79,2 s, 1080×1920, 25 fps, AAC). Comparaison des frames de cut
+`268/360/654/839/1134/1233/1714` : l'ancien et le nouveau export diffèrent uniquement dans la
+bande du segment sortant (`crop=1080:1414:0:252`, PSNR ≈ 12,8 dB), tandis que l'intérieur du
+nouveau masque reste identique (PSNR 44,6 à 64,8 dB). Les frames N−1 (dernière frame du
+sortant) et N+1 (deuxième frame de l'entrant) sont inchangées (PSNR ≈ 47 à 54 dB). Sur le cut
+non contigu `3,68 → 3,72`, la frame 92 perd le débordement du sortant (PSNR 6,0 dB, même
+bbox) et les frames 93/94 restent identiques (PSNR ≈ 46,6/47,1 dB). Le correctif ne modifie
+donc que la frame de cut (et la frame de trou), pas le contenu des segments ni les frames
+voisines.
 
 **Validation** : W9 `mask_blur` (masque sur le 3ᵉ clip + flou sur le 4ᵉ) conforme aux captures
 Premiere ; Mabille : 3 masques sur la piste V2, split screens cadrés et synchronisés (apparition à

@@ -51,7 +51,8 @@ python3 prproj2ffmpeg.py projet.prproj --dump                            # modè
 - **Pistes overlay** : les médias des pistes supérieures sont composités dans l'ordre des pistes
   (Z-order Premiere : V2 sous V3, couche 0 = images fixes de V1) :
   - images avec alpha (PNG/JPG) et vidéos avec alpha (ProRes 4444 `.mov`) ;
-  - fenêtres temporelles respectées (`enable` par item) ;
+  - fenêtres temporelles respectées (`enable` par item, demi-ouvertes : l'overlay sortant ne
+    reste pas actif sur la frame du cut) ;
   - un même élément rejoué consécutivement n'est lu en **boucle** que si sa durée couvre la fin
     réelle du fichier (sinon les replays restent des `trim` séparés, corrects) ;
   - transformations Motion des overlays également supportées ; une image fixe à zoom/rotation
